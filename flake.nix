@@ -53,7 +53,18 @@
 
           echo ">>> 3. 使用 Nix Python 解析 repodata 提取所有依赖 URL 与 SHA256..."
           TMP_DIR="$TMP_DIR" python3 - << 'PYEOF'
-          import json, gzip, xml.etree.ElementTree as ET, os
+          import json, gzip, io, xml.etree.ElementTree as ET, os
+          from compression import zstd
+
+          def open_metadata(path):
+              with open(path, "rb") as f:
+                  magic = f.read(4)
+              if magic.startswith(b"\x28\xb5\x2f\xfd"):
+                  return zstd.open(path, "rb")
+              elif magic.startswith(b"\x1f\x8b"):
+                  return gzip.open(path, "rb")
+              else:
+                  return open(path, "rb")
 
           tmp_dir = os.environ["TMP_DIR"]
           with open(f"{tmp_dir}/spec.json") as f:
@@ -81,8 +92,8 @@
               primary_loc = rmd.find(".//r:data[@type='primary']/r:location", ns).attrib["href"]
               primary_path = f"{tmp_dir}/zypp-cache/raw/{repo_alias}/{primary_loc}"
 
-              with gzip.open(primary_path, "rb") as gz:
-                  p_root = ET.parse(gz).getroot()
+              with open_metadata(primary_path) as meta_f:
+                  p_root = ET.parse(meta_f).getroot()
               pns = {"c": "http://linux.duke.edu/metadata/common"}
               for pkg in p_root.findall("c:package", pns):
                   name = pkg.find("c:name", pns).text
