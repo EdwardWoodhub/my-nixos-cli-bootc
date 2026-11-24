@@ -20,9 +20,9 @@
           echo ">>> 1. 解析基础镜像 Digest 与 Nix SHA256..."
           PREFETCH_JSON=$(nix-prefetch-docker --json --image-name "${spec.baseImage.name}" --image-tag "${spec.baseImage.tag}" --quiet)
           DIGEST=$(echo "$PREFETCH_JSON" | jq -r '.imageDigest')
-          NIX_SHA256=$(echo "$PREFETCH_JSON" | jq -r '.hash // .sha256')
+          NIX_SHA256=$(nix-prefetch-docker --json --image-name "${spec.baseImage.name}" --image-digest "$DIGEST" --quiet | jq -r '.hash // .sha256')
           if [ -z "$NIX_SHA256" ] || [ "$NIX_SHA256" = "null" ]; then
-            echo "错误: 无法解析基础镜像 Nix Hash，原始输出为: $PREFETCH_JSON"
+            echo "错误: 无法解析基础镜像 Nix Hash"
             exit 1
           fi
 
@@ -35,7 +35,6 @@
           ${builtins.toJSON spec}
           EOF
 
-          # 启用 keeppackages=1 并执行 --download-only，让 Zypper 把所有依赖 RPM 实体文件拉到缓存目录
           docker run --rm \
             -v "$TMP_DIR:/work" \
             -v "$TMP_DIR/zypp-cache:/var/cache/zypp" \
@@ -51,9 +50,9 @@
                 ${pkgs.lib.escapeShellArgs spec.rpmPackages}
             '
 
-          echo ">>> 3. 扫描已下载的 RPM 实体文件并计算精准 SHA256..."
+          echo ">>> 3. 扫描 RPM 实体文件、计算 SHA256 并直接预注入本地 Nix Store..."
           TMP_DIR="$TMP_DIR" python3 - << 'PYEOF'
-          import json, hashlib, os
+          import json, hashlib, os, subprocess
 
           tmp_dir = os.environ["TMP_DIR"]
           with open(f"{tmp_dir}/spec.json") as f:
@@ -76,13 +75,14 @@
                           full_path = os.path.join(root, fname)
                           rel_path = os.path.relpath(full_path, repo_dir)
 
-                          # 计算文件真实 SHA256
+                          # 直接将已下载的 RPM 注入 Nix Store，防止后续 fetchurl 遭遇滚动源 404
+                          subprocess.run(["nix-store", "--add-fixed", "sha256", full_path], check=True, stdout=subprocess.DEVNULL)
+
                           h = hashlib.sha256()
                           with open(full_path, "rb") as rf:
                               for chunk in iter(lambda: rf.read(65536), b""):
                                   h.update(chunk)
 
-                          # 提取包名与版本作为 derivation 标识
                           stem = fname[:-4]
                           parts = stem.rsplit("-", 2)
                           pkg_name = parts[0] if len(parts) == 3 else stem
@@ -101,7 +101,7 @@
           locked_rpms.sort(key=lambda x: x["name"])
           with open(f"{tmp_dir}/locked_rpms.json", "w") as out:
               json.dump(locked_rpms, out, indent=2)
-          print(f"成功锁定 {len(locked_rpms)} 个 RPM 包及其真实 SHA256！")
+          print(f"成功锁定并预缓存 {len(locked_rpms)} 个 RPM 包！")
           PYEOF
 
           # 4. 合成最终的 rpms.lock.json
