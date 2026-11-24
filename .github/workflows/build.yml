@@ -82,6 +82,22 @@ jobs:
           # 在完整合并的根文件系统中执行收尾与 bootc 合规性检查
           docker run --name bootc-finalize my-opensuse-fhs-bootc:latest /bin/bash -c '
             set -e
+            # 0. 将 buildLayeredImage 生成的指向 /nix/store 的软链接就地解引用为实体文件，并清理 /nix
+            find / -xdev -type l | while read -r link; do
+              target=$(readlink "$link")
+              if [[ "$target" == /nix/store* ]]; then
+                if [ -e "$link" ]; then
+                  tmp_copy="${link}.nixderef"
+                  cp -aL "$link" "$tmp_copy"
+                  rm -f "$link"
+                  mv "$tmp_copy" "$link"
+                else
+                  rm -f "$link"
+                fi
+              fi
+            done
+            rm -rf /nix
+
             # 1. 刷新动态链接库缓存并还原被 Nix Store 剥离的 SUID 特殊权限位
             ldconfig
             chmod 4755 /usr/bin/sudo || true
@@ -105,20 +121,17 @@ jobs:
             # 4. 生成 modules.dep 并满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz 与 initramfs.img)
             KVER=$(ls -1 /usr/lib/modules | head -n 1)
             [ -f "/boot/vmlinuz-$KVER" ] && mv "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"
-            # [新增] 清理指向外部源码树的悬空/越界软链接，避免 bootc lint kernel 报错
             rm -f "/usr/lib/modules/$KVER/build" "/usr/lib/modules/$KVER/source"
             depmod -a "$KVER"
             dracut --force --no-hostonly --no-hostonly-cmdline --kver "$KVER" "/usr/lib/modules/$KVER/initramfs.img"
             rm -rf /boot/* /var/cache/* /tmp/*
 
-            # 5. [新增] 清理 openSUSE RPM 包带入的非法 /usr/etc 目录，合并至标准 /etc
+            # 5. 清理 openSUSE RPM 包带入的非法 /usr/etc 目录，合并至标准 /etc
             if [ -d /usr/etc ]; then
               cp -rn /usr/etc/. /etc/
               rm -rf /usr/etc
             fi
 
-            
-            
             # 6. 执行 bootc 官方镜像规范校验
             bootc container lint
           '
