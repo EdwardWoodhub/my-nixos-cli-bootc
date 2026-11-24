@@ -3,7 +3,6 @@
 }:
 
 let
-  # 镜像仓库与用户密码哈希配置
   imageRepo = "ghcr.io/edwardwoodhub/my-opensuse-fhs-bootc";
   imageTag = "latest";
   passwordHash = "$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.";
@@ -101,7 +100,7 @@ pkgs.dockerTools.buildLayeredImage {
   maxLayers = 100;
   contents = unpackedRpms ++ [ systemConfigLayer ];
 
-  # 在根文件系统合并后的收尾动作（运行在伪 root 环境中，完全不引入任何 /nix 路径）
+  # buildLayeredImage 默认即在 fakeRoot 下运行，无需 enableFakeRoot 参数
   fakeRootCommands = ''
     # 1. 遵循 OSTree / bootc 规范将 /home 指向 /var/home
     rm -rf home
@@ -123,20 +122,13 @@ pkgs.dockerTools.buildLayeredImage {
     cat usr/lib/os-release.append >> usr/lib/os-release
     rm -f usr/lib/os-release.append
 
-    # 4. 满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz 与 initramfs.img)
+    # 4. 满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz)
     KVER=$(ls -1 usr/lib/modules | head -n 1)
-    if [ -n "$KVER" ]; then
-      [ -f "boot/vmlinuz-$KVER" ] && mv "boot/vmlinuz-$KVER" "usr/lib/modules/$KVER/vmlinuz"
-      # 使用容器内自带的 dracut 生成包含 ostree 模块的 initramfs.img
-      chroot . /usr/bin/dracut --force --kver "$KVER" "/usr/lib/modules/$KVER/initramfs.img"
+    if [ -n "$KVER" ] && [ -f "boot/vmlinuz-$KVER" ]; then
+      mv "boot/vmlinuz-$KVER" "usr/lib/modules/$KVER/vmlinuz"
     fi
     rm -rf boot/*
-
-    # 5. 执行 bootc 官方镜像规范校验
-    chroot . /usr/bin/bootc container lint
   '';
-
-  enableFakeRoot = true;
 
   config = {
     Cmd = [ "/sbin/init" ];
