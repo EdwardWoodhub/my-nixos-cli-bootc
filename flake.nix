@@ -18,7 +18,7 @@
         text = ''
           set -euo pipefail
           echo ">>> 1. 解析基础镜像 Digest 与 Nix SHA256..."
-          PREFETCH_JSON=$(nix-prefetch-docker --image-name "${spec.baseImage.name}" --image-tag "${spec.baseImage.tag}" --quiet)
+          PREFETCH_JSON=$(nix-prefetch-docker --json --image-name "${spec.baseImage.name}" --image-tag "${spec.baseImage.tag}" --quiet)
           DIGEST=$(echo "$PREFETCH_JSON" | jq -r '.imageDigest')
           NIX_SHA256=$(echo "$PREFETCH_JSON" | jq -r '.sha256')
 
