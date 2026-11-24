@@ -45,7 +45,14 @@ let
     mkdir -p $out/etc/profile.d \
              $out/etc/sudoers.d \
              $out/etc/dracut.conf.d \
-             $out/etc/systemd/system/multi-user.target.wants
+             $out/etc/systemd/system/multi-user.target.wants \
+             $out/usr/lib/ostree
+
+    # [新增] 启用 composefs，消除 baseimage-composefs 警告并确保 rootfs 正常挂载
+    cat <<'EOF' > $out/usr/lib/ostree/prepare-root.conf
+    [composefs]
+    enabled = yes
+    EOF
 
     # 暴露 /usr/local/bin、/usr/sbin 与 /sbin
     cat <<'EOF' > $out/etc/profile.d/custom-sbin-path.sh
@@ -87,7 +94,6 @@ let
     ln -sf /usr/lib/systemd/system/vmtoolsd.service $out/etc/systemd/system/multi-user.target.wants/vmtoolsd.service
 
     # 写入 os-release 镜像追踪元数据暂存文件
-    mkdir -p $out/usr/lib
     cat <<EOF > $out/usr/lib/os-release.append
     IMAGE_REPO="${imageRepo}"
     IMAGE_TAG="${imageTag}"
@@ -105,9 +111,9 @@ pkgs.dockerTools.buildLayeredImage {
   maxLayers = 100;
   contents = unpackedRpms ++ [ systemConfigLayer ];
 
-  # fakeRootCommands 运行在独立的顶层目录中，仅创建 OSTree 标准 /home -> /var/home 映射
+  # [修改] 补充 sysroot 挂载点，满足 baseimage-root 规范
   fakeRootCommands = ''
-    mkdir -p var/home
+    mkdir -p var/home sysroot
     ln -s var/home home
   '';
 
