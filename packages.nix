@@ -4,21 +4,21 @@
     tag = "16.0";
   };
 
-  # 1. openSUSE 软件源定义
+  # 1. openSUSE 软件源定义（新增 Virtualization:containers 源以获取 bootc 和 ostree）
   repos = [
     { name = "oss"; url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"; priority = 90; }
     { name = "non-oss"; url = "https://download.opensuse.org/distribution/leap/16.0/repo/non-oss/"; priority = 90; }
     { name = "M17N-fonts"; url = "https://download.opensuse.org/repositories/M17N:/fonts/16.0/"; priority = 95; }
     { name = "utilities"; url = "https://download.opensuse.org/repositories/utilities/16.0/"; priority = 95; }
     { name = "factory"; url = "https://download.opensuse.org/repositories/openSUSE:/Factory/standard/"; priority = 115; }
+    { name = "virt-containers"; url = "https://download.opensuse.org/repositories/Virtualization:/containers/openSUSE_Tumbleweed/"; priority = 120; }
   ];
 
-  # 2. 声明需要的 RPM 包名（自动解析完整依赖树，无需手写 URL 和 SHA256）
+  # 2. 声明需要的 RPM 包名（移除不存在的 ostree-grub2 和缺源的 uv，uv 改用 Nix 静态二进制注入）
   rpmPackages = [
     "shim"
     "bootc"
     "ostree"
-    "ostree-grub2"
     "7zip"
     "bandwhich"
     "btop"
@@ -58,7 +58,6 @@
     "tar"
     "timezone"
     "tmux"
-    "uv"
     "vim"
     "which"
   ];
