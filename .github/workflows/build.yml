@@ -40,16 +40,16 @@ jobs:
       - name: Setup Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@main
 
-      # 3. 自动解析依赖并更新 rpms.lock.json（定时任务或修改 packages.nix 后自动刷新）
+      # 3. 自动解析依赖并更新 rpms.lock.json
       - name: Lock openSUSE RPMs & Base Image SHA256
         run: |
-          # 如果不存在 lock 文件、或者定时触发、或者本次提交修改了 packages.nix，则重新锁定依赖
-          if [ ! -f rpms.lock.json ] || [ "${{ github.event_name }}" == "schedule" ] || git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q "packages.nix"; then
-            echo ">>> 检测到依赖变更或定时更新，正在自动生成 rpms.lock.json..."
+          if [ ! -f rpms.lock.json ] || grep -q '"null"' rpms.lock.json || [ "${{ github.event_name }}" == "schedule" ] || git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q "packages.nix"; then
+            echo ">>> 检测到依赖变更、锁文件无效或定时更新，正在自动生成 rpms.lock.json..."
             nix run .#lock
           else
-            echo ">>> packages.nix 未变更，直接复用现有 rpms.lock.json 确定性构建"
+            echo ">>> packages.nix 未变更且锁文件有效，直接复用现有 rpms.lock.json"
           fi
+      
 
       # 4. 若 rpms.lock.json 有变动，自动 commit 回仓库（带 [skip ci] 防止死循环）
       - name: Commit Updated Lockfile
