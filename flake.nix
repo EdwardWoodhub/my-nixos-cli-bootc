@@ -20,7 +20,11 @@
           echo ">>> 1. 解析基础镜像 Digest 与 Nix SHA256..."
           PREFETCH_JSON=$(nix-prefetch-docker --json --image-name "${spec.baseImage.name}" --image-tag "${spec.baseImage.tag}" --quiet)
           DIGEST=$(echo "$PREFETCH_JSON" | jq -r '.imageDigest')
-          NIX_SHA256=$(echo "$PREFETCH_JSON" | jq -r '.sha256')
+          NIX_SHA256=$(echo "$PREFETCH_JSON" | jq -r '.hash // .sha256')
+          if [ -z "$NIX_SHA256" ] || [ "$NIX_SHA256" = "null" ]; then
+            echo "错误: 无法解析基础镜像 Nix Hash，原始输出为: $PREFETCH_JSON"
+            exit 1
+          fi
 
           echo ">>> 2. 在临时容器中运行 Zypper 计算完整依赖闭包..."
           TMP_DIR=$(mktemp -d)
