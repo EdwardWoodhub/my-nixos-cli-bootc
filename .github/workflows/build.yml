@@ -12,11 +12,11 @@ on:
     paths-ignore:
       - "**.md"
 
-  # 3. 支持手动点击运行
+  # 3. 支持在 GitHub 网页上手动点击运行
   workflow_dispatch:
 
 permissions:
-  contents: write # 允许自动提交更新后的 rpms.lock.json 及创建 Release
+  contents: write # 允许自动提交更新后的 rpms.lock.json
   packages: write # 允许向 GHCR 推送镜像
 
 jobs:
@@ -36,11 +36,11 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # 2. 启用 GitHub Actions 原生 Nix Store 缓存（核心！实现未变动 RPM Derivation 秒级复用）
+      # 2. 启用 GitHub Actions 原生 Nix Store 缓存（未变动的 RPM 解包层秒级复用）
       - name: Setup Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@main
 
-      # 3. 自动解析依赖并更新 rpms.lock.json
+      # 3. 自动解析依赖并更新 rpms.lock.json（包含锁文件缺失或损坏自愈检测）
       - name: Lock openSUSE RPMs & Base Image SHA256
         run: |
           if [ ! -f rpms.lock.json ] || grep -q '"null"' rpms.lock.json || [ "${{ github.event_name }}" == "schedule" ] || git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q "packages.nix"; then
@@ -49,7 +49,6 @@ jobs:
           else
             echo ">>> packages.nix 未变更且锁文件有效，直接复用现有 rpms.lock.json"
           fi
-      
 
       # 4. 若 rpms.lock.json 有变动，自动 commit 回仓库（带 [skip ci] 防止死循环）
       - name: Commit Updated Lockfile
@@ -75,33 +74,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 7. 生成 initramfs、校验 bootc 规范并推送到 GHCR
-      - name: Finalize initramfs, Lint & Push to GHCR
+      # 7. 还原 SUID、初始化用户、生成 initramfs、校验 bootc 规范并推送到 GHCR
+      - name: Finalize System, Lint & Push to GHCR
         run: |
           docker load < result
 
-          # 在真实容器环境中生成包含 ostree 模块的 initramfs.img 并执行 bootc container lint
+          # 在完整合并的根文件系统中执行收尾与 bootc 合规性检查
           docker run --name bootc-finalize my-opensuse-fhs-bootc:latest /bin/bash -c '
             set -e
+            # 1. 还原被 Nix Store 剥离的 SUID 特殊权限位
+            chmod 4755 /usr/bin/sudo || true
+            chmod 4750 /usr/libexec/dbus-1/dbus-daemon-launch-helper || true
+
+            # 2. 创建用户并注入加盐哈希密码（家目录落在 /var/home 下）
+            groupadd -f wheel
+            useradd -m -d /var/home/liveuser -G wheel -s /bin/bash liveuser || true
+            usermod -p '\''$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.'\'' liveuser
+            useradd -m -d /var/home/peter -G wheel -s /bin/bash peter || true
+            usermod -p '\''$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.'\'' peter
+            usermod -p '\''$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.'\'' root
+            mkdir -p /var/home/peter/winShare && chown -R peter:peter /var/home/peter
+
+            # 3. 合并 os-release 元数据
+            if [ -f /usr/lib/os-release.append ]; then
+              cat /usr/lib/os-release.append >> /usr/lib/os-release
+              rm -f /usr/lib/os-release.append
+            fi
+
+            # 4. 满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz 与 initramfs.img)
             KVER=$(ls -1 /usr/lib/modules | head -n 1)
+            [ -f "/boot/vmlinuz-$KVER" ] && mv "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"
             dracut --force --kver "$KVER" "/usr/lib/modules/$KVER/initramfs.img"
             rm -rf /boot/* /var/cache/* /tmp/*
+
+            # 5. 执行 bootc 官方镜像规范校验
             bootc container lint
           '
 
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           GHCR_IMAGE="ghcr.io/${REPO_OWNER}/my-opensuse-fhs-bootc:latest"
 
-          # 提交轻量顶层变更（仅包含 initramfs.img），保留底层全部 Nix 分层缓存
+          # 提交轻量顶层变更，保留底层全部 Nix 100 层切片缓存
           docker commit bootc-finalize "$GHCR_IMAGE"
           docker rm bootc-finalize
 
           echo ">>> 正在增量推送到 GHCR: $GHCR_IMAGE"
           docker push "$GHCR_IMAGE"
-      
-      
 
-      # 8. 使用 Skopeo 同步镜像到阿里云 ACR（保持与你原有 ACR 仓库同步）
+      # 8. 使用 Skopeo 同步镜像到阿里云 ACR
       - name: Sync Image from GHCR to Aliyun ACR using Skopeo
         run: |
           sudo apt-get update && sudo apt-get install -y skopeo
