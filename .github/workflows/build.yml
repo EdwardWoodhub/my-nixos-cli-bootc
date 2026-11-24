@@ -105,11 +105,19 @@ jobs:
             # 4. 生成 modules.dep 并满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz 与 initramfs.img)
             KVER=$(ls -1 /usr/lib/modules | head -n 1)
             [ -f "/boot/vmlinuz-$KVER" ] && mv "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"
+            # [新增] 清理指向外部源码树的悬空/越界软链接，避免 bootc lint kernel 报错
+            rm -f "/usr/lib/modules/$KVER/build" "/usr/lib/modules/$KVER/source"
             depmod -a "$KVER"
             dracut --force --no-hostonly --no-hostonly-cmdline --kver "$KVER" "/usr/lib/modules/$KVER/initramfs.img"
             rm -rf /boot/* /var/cache/* /tmp/*
 
-            # 5. 执行 bootc 官方镜像规范校验
+            # 5. [新增] 清理 openSUSE RPM 包带入的非法 /usr/etc 目录，合并至标准 /etc
+            if [ -d /usr/etc ]; then
+              cp -rn /usr/etc/. /etc/
+              rm -rf /usr/etc
+            fi
+
+            # 6. 执行 bootc 官方镜像规范校验
             bootc container lint
           '
 
