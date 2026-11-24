@@ -39,6 +39,7 @@
     "iotop"
     "iproute2"
     "kernel-default"
+    "kmod"
     "less"
     "mtools"
     "nano"
