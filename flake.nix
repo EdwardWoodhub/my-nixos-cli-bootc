@@ -26,7 +26,7 @@
             exit 1
           fi
 
-          echo ">>> 2. 在临时容器中运行 Zypper 计算完整依赖闭包..."
+          echo ">>> 2. 在临时容器中运行 Zypper 下载完整依赖闭包 (--download-only)..."
           TMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TMP_DIR" 2>/dev/null || true' EXIT
           mkdir -p "$TMP_DIR/zypp-cache"
@@ -35,6 +35,7 @@
           ${builtins.toJSON spec}
           EOF
 
+          # 启用 keeppackages=1 并执行 --download-only，让 Zypper 把所有依赖 RPM 实体文件拉到缓存目录
           docker run --rm \
             -v "$TMP_DIR:/work" \
             -v "$TMP_DIR/zypp-cache:/var/cache/zypp" \
@@ -42,89 +43,68 @@
               trap "chmod -R 777 /work /var/cache/zypp 2>/dev/null || true" EXIT
               set -e
               ${pkgs.lib.concatMapStringsSep "\n" (r: ''
-                zypper --non-interactive ar -cf -p ${toString r.priority} "${r.url}" "${r.name}" || true
+                zypper --non-interactive ar -cf -k -p ${toString r.priority} "${r.url}" "${r.name}" || true
               '') spec.repos}
               zypper --non-interactive --gpg-auto-import-keys refresh
-              echo ">>> 正在执行 Zypper 依赖求解 (dry-run)..."
-              if ! zypper --non-interactive --xmlout install --dry-run --no-recommends --allow-vendor-change -- \
-                ${pkgs.lib.escapeShellArgs spec.rpmPackages} > /work/zypper_out.xml 2> /work/zypper_err.log; then
-                echo "=== Zypper 依赖求解报错详情 ==="
-                cat /work/zypper_err.log
-                cat /work/zypper_out.xml
-                exit 1
-              fi
+              echo ">>> 正在解析并下载所有依赖 RPM 包..."
+              zypper --non-interactive install --download-only --no-recommends --allow-vendor-change -- \
+                ${pkgs.lib.escapeShellArgs spec.rpmPackages}
             '
 
-          echo ">>> 3. 使用 Nix Python 解析 repodata 提取所有依赖 URL 与 SHA256..."
+          echo ">>> 3. 扫描已下载的 RPM 实体文件并计算精准 SHA256..."
           TMP_DIR="$TMP_DIR" python3 - << 'PYEOF'
-          import json, gzip, xml.etree.ElementTree as ET, os
-          from compression import zstd
-
-          def open_metadata(path):
-              with open(path, "rb") as f:
-                  magic = f.read(4)
-              if magic.startswith(b"\x28\xb5\x2f\xfd"):
-                  return zstd.open(path, "rb")
-              elif magic.startswith(b"\x1f\x8b"):
-                  return gzip.open(path, "rb")
-              else:
-                  return open(path, "rb")
+          import json, hashlib, os
 
           tmp_dir = os.environ["TMP_DIR"]
           with open(f"{tmp_dir}/spec.json") as f:
               spec = json.load(f)
 
-          root = ET.parse(f"{tmp_dir}/zypper_out.xml").getroot()
-
-          targets = {}
-          for solvable in root.findall(".//solvable[@type='package'][@status='to-be-installed']"):
-              name = solvable.attrib["name"]
-              evr = solvable.attrib["edition"]
-              arch = solvable.attrib["arch"]
-              repo = solvable.attrib["repository"]
-              targets[(name, evr, arch)] = repo
-
           repo_urls = {r["name"]: r["url"].rstrip("/") for r in spec["repos"]}
+          pkg_root = f"{tmp_dir}/zypp-cache/packages"
           locked_rpms = []
 
-          for repo_alias, base_url in repo_urls.items():
-              repomd_path = f"{tmp_dir}/zypp-cache/raw/{repo_alias}/repodata/repomd.xml"
-              if not os.path.exists(repomd_path):
-                  continue
-              rmd = ET.parse(repomd_path).getroot()
-              ns = {"r": "http://linux.duke.edu/metadata/repo"}
-              primary_loc = rmd.find(".//r:data[@type='primary']/r:location", ns).attrib["href"]
-              primary_path = f"{tmp_dir}/zypp-cache/raw/{repo_alias}/{primary_loc}"
+          if os.path.exists(pkg_root):
+              for repo_alias in os.listdir(pkg_root):
+                  if repo_alias not in repo_urls:
+                      continue
+                  base_url = repo_urls[repo_alias]
+                  repo_dir = os.path.join(pkg_root, repo_alias)
+                  for root, _, files in os.walk(repo_dir):
+                      for fname in files:
+                          if not fname.endswith(".rpm"):
+                              continue
+                          full_path = os.path.join(root, fname)
+                          rel_path = os.path.relpath(full_path, repo_dir)
 
-              with open_metadata(primary_path) as meta_f:
-                  p_root = ET.parse(meta_f).getroot()
-              pns = {"c": "http://linux.duke.edu/metadata/common"}
-              for pkg in p_root.findall("c:package", pns):
-                  name = pkg.find("c:name", pns).text
-                  arch = pkg.find("c:arch", pns).text
-                  ver_el = pkg.find("c:version", pns)
-                  epoch = ver_el.attrib.get("epoch", "0")
-                  ver = ver_el.attrib["ver"]
-                  rel = ver_el.attrib["rel"]
-                  evr = f"{ver}-{rel}" if epoch == "0" else f"{epoch}:{ver}-{rel}"
+                          # 计算文件真实 SHA256
+                          h = hashlib.sha256()
+                          with open(full_path, "rb") as rf:
+                              for chunk in iter(lambda: rf.read(65536), b""):
+                                  h.update(chunk)
 
-                  if (name, evr, arch) in targets and targets[(name, evr, arch)] == repo_alias:
-                      csum = pkg.find("c:checksum", pns).text
-                      href = pkg.find("c:location", pns).attrib["href"]
-                      locked_rpms.append({
-                          "name": name,
-                          "evr": evr,
-                          "url": f"{base_url}/{href}",
-                          "sha256": csum
-                      })
+                          # 提取包名与版本作为 derivation 标识
+                          stem = fname[:-4]
+                          parts = stem.rsplit("-", 2)
+                          pkg_name = parts[0] if len(parts) == 3 else stem
+                          evr = f"{parts[1]}-{parts[2]}" if len(parts) == 3 else "latest"
+
+                          locked_rpms.append({
+                              "name": pkg_name,
+                              "evr": evr,
+                              "url": f"{base_url}/{rel_path}",
+                              "sha256": h.hexdigest()
+                          })
+
+          if not locked_rpms:
+              raise RuntimeError("错误: 未在 zypp 缓存中找到任何下载的 RPM 文件！")
 
           locked_rpms.sort(key=lambda x: x["name"])
           with open(f"{tmp_dir}/locked_rpms.json", "w") as out:
               json.dump(locked_rpms, out, indent=2)
-          print(f"成功锁定 {len(locked_rpms)} 个 RPM 包及其 SHA256！")
+          print(f"成功锁定 {len(locked_rpms)} 个 RPM 包及其真实 SHA256！")
           PYEOF
 
-          # 4. 合成最终的 rpms.lock.json（包含 imageDigest 和 nix sha256）
+          # 4. 合成最终的 rpms.lock.json
           jq -n \
             --arg imgName "${spec.baseImage.name}" \
             --arg imgTag "${spec.baseImage.tag}" \
