@@ -48,7 +48,7 @@ let
              $out/etc/systemd/system/multi-user.target.wants \
              $out/usr/lib/ostree
 
-    # [新增] 启用 composefs，消除 baseimage-composefs 警告并确保 rootfs 正常挂载
+    # 启用 composefs，消除 baseimage-composefs 警告并确保 rootfs 正常挂载
     cat <<'EOF' > $out/usr/lib/ostree/prepare-root.conf
     [composefs]
     enabled = yes
@@ -107,14 +107,13 @@ pkgs.dockerTools.buildLayeredImage {
   tag = imageTag;
   fromImage = baseImage;
 
-  # [新增] 强制将所有文件实体打包进镜像层，禁止生成指向 /nix/store 的软链接
-  includeStorePaths = false;
-
   # 每个 RPM Derivation 自动分配独立 OCI Layer（最多 100 层），实现修改单个包秒级增量推送
   maxLayers = 100;
-  contents = unpackedRpms ++ [ systemConfigLayer ];
 
-  # [修改] 补充 sysroot 挂载点，满足 baseimage-root 规范
+  # 使用 copyToRoot 替代 contents，强制物理复制实体文件，绝不生成指向 /nix/store 的软链接
+  copyToRoot = unpackedRpms ++ [ systemConfigLayer ];
+
+  # fakeRootCommands 运行在独立的顶层目录中，创建 OSTree 标准目录结构
   fakeRootCommands = ''
     mkdir -p var/home sysroot
     ln -s var/home home
