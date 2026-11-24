@@ -31,7 +31,6 @@
           ${builtins.toJSON spec}
           EOF
 
-          # 容器内使用 trap 确保无论成功还是失败，退出前都把挂载卷权限归还给宿主机普通用户
           docker run --rm \
             -v "$TMP_DIR:/work" \
             -v "$TMP_DIR/zypp-cache:/var/cache/zypp" \
@@ -43,7 +42,7 @@
               '') spec.repos}
               zypper --non-interactive --gpg-auto-import-keys refresh
               echo ">>> 正在执行 Zypper 依赖求解 (dry-run)..."
-              if ! zypper --non-interactive --xmlout install --dry-run --no-recommends -- \
+              if ! zypper --non-interactive --xmlout install --dry-run --no-recommends --allow-vendor-change -- \
                 ${pkgs.lib.escapeShellArgs spec.rpmPackages} > /work/zypper_out.xml 2> /work/zypper_err.log; then
                 echo "=== Zypper 依赖求解报错详情 ==="
                 cat /work/zypper_err.log
