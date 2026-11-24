@@ -24,25 +24,32 @@
 
           echo ">>> 2. 在临时容器中运行 Zypper 计算完整依赖闭包..."
           TMP_DIR=$(mktemp -d)
-          trap 'rm -rf "$TMP_DIR"' EXIT
+          trap 'rm -rf "$TMP_DIR" 2>/dev/null || true' EXIT
           mkdir -p "$TMP_DIR/zypp-cache"
 
           cat <<'EOF' > "$TMP_DIR/spec.json"
           ${builtins.toJSON spec}
           EOF
 
-          # 仅在容器内运行原生 zypper，把 raw 元数据缓存直接挂载到宿主机的 $TMP_DIR/zypp-cache
+          # 容器内使用 trap 确保无论成功还是失败，退出前都把挂载卷权限归还给宿主机普通用户
           docker run --rm \
             -v "$TMP_DIR:/work" \
             -v "$TMP_DIR/zypp-cache:/var/cache/zypp" \
             "${spec.baseImage.name}:${spec.baseImage.tag}" /bin/bash -c '
+              trap "chmod -R 777 /work /var/cache/zypp 2>/dev/null || true" EXIT
               set -e
               ${pkgs.lib.concatMapStringsSep "\n" (r: ''
                 zypper --non-interactive ar -cf -p ${toString r.priority} "${r.url}" "${r.name}" || true
               '') spec.repos}
               zypper --non-interactive --gpg-auto-import-keys refresh
-              zypper --non-interactive --xmlout install --dry-run --no-recommends -- \
-                ${pkgs.lib.escapeShellArgs spec.rpmPackages} > /work/zypper_out.xml
+              echo ">>> 正在执行 Zypper 依赖求解 (dry-run)..."
+              if ! zypper --non-interactive --xmlout install --dry-run --no-recommends -- \
+                ${pkgs.lib.escapeShellArgs spec.rpmPackages} > /work/zypper_out.xml 2> /work/zypper_err.log; then
+                echo "=== Zypper 依赖求解报错详情 ==="
+                cat /work/zypper_err.log
+                cat /work/zypper_out.xml
+                exit 1
+              fi
             '
 
           echo ">>> 3. 使用 Nix Python 解析 repodata 提取所有依赖 URL 与 SHA256..."
