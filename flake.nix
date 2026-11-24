@@ -25,32 +25,38 @@
           echo ">>> 2. 在临时容器中运行 Zypper 计算完整依赖闭包..."
           TMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TMP_DIR"' EXIT
+          mkdir -p "$TMP_DIR/zypp-cache"
 
           cat <<'EOF' > "$TMP_DIR/spec.json"
           ${builtins.toJSON spec}
           EOF
 
-          docker run --rm -v "$TMP_DIR:/work" "${spec.baseImage.name}:${spec.baseImage.tag}" /bin/bash -c '
-            set -e
-            python3 - << "PYEOF"
-          import json, subprocess, gzip, xml.etree.ElementTree as ET, os
+          # 仅在容器内运行原生 zypper，把 raw 元数据缓存直接挂载到宿主机的 $TMP_DIR/zypp-cache
+          docker run --rm \
+            -v "$TMP_DIR:/work" \
+            -v "$TMP_DIR/zypp-cache:/var/cache/zypp" \
+            "${spec.baseImage.name}:${spec.baseImage.tag}" /bin/bash -c '
+              set -e
+              ${pkgs.lib.concatMapStringsSep "\n" (r: ''
+                zypper --non-interactive ar -cf -p ${toString r.priority} "${r.url}" "${r.name}" || true
+              '') spec.repos}
+              zypper --non-interactive --gpg-auto-import-keys refresh
+              zypper --non-interactive --xmlout install --dry-run --no-recommends -- \
+                ${pkgs.lib.escapeShellArgs spec.rpmPackages} > /work/zypper_out.xml
+            '
 
-          with open("/work/spec.json") as f:
+          echo ">>> 3. 使用 Nix Python 解析 repodata 提取所有依赖 URL 与 SHA256..."
+          TMP_DIR="$TMP_DIR" python3 - << 'PYEOF'
+          import json, gzip, xml.etree.ElementTree as ET, os
+
+          tmp_dir = os.environ["TMP_DIR"]
+          with open(f"{tmp_dir}/spec.json") as f:
               spec = json.load(f)
 
-          for r in spec["repos"]:
-              subprocess.run(
-                  ["zypper", "--non-interactive", "ar", "-cf", "-p", str(r["priority"]), r["url"], r["name"]],
-                  check=False
-              )
-          subprocess.run(["zypper", "--non-interactive", "--gpg-auto-import-keys", "refresh"], check=True)
-
-          cmd = ["zypper", "--non-interactive", "--xmlout", "install", "--dry-run", "--no-recommends", "--"] + spec["rpmPackages"]
-          res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-          root = ET.fromstring(res.stdout)
+          root = ET.parse(f"{tmp_dir}/zypper_out.xml").getroot()
 
           targets = {}
-          for solvable in root.findall(".//solvable[@type=\"package\"][@status=\"to-be-installed\"]"):
+          for solvable in root.findall(".//solvable[@type='package'][@status='to-be-installed']"):
               name = solvable.attrib["name"]
               evr = solvable.attrib["edition"]
               arch = solvable.attrib["arch"]
@@ -61,13 +67,13 @@
           locked_rpms = []
 
           for repo_alias, base_url in repo_urls.items():
-              repomd_path = f"/var/cache/zypp/raw/{repo_alias}/repodata/repomd.xml"
+              repomd_path = f"{tmp_dir}/zypp-cache/raw/{repo_alias}/repodata/repomd.xml"
               if not os.path.exists(repomd_path):
                   continue
               rmd = ET.parse(repomd_path).getroot()
               ns = {"r": "http://linux.duke.edu/metadata/repo"}
-              primary_loc = rmd.find(".//r:data[@type=\"primary\"]/r:location", ns).attrib["href"]
-              primary_path = f"/var/cache/zypp/raw/{repo_alias}/{primary_loc}"
+              primary_loc = rmd.find(".//r:data[@type='primary']/r:location", ns).attrib["href"]
+              primary_path = f"{tmp_dir}/zypp-cache/raw/{repo_alias}/{primary_loc}"
 
               with gzip.open(primary_path, "rb") as gz:
                   p_root = ET.parse(gz).getroot()
@@ -92,13 +98,12 @@
                       })
 
           locked_rpms.sort(key=lambda x: x["name"])
-          with open("/work/locked_rpms.json", "w") as out:
+          with open(f"{tmp_dir}/locked_rpms.json", "w") as out:
               json.dump(locked_rpms, out, indent=2)
           print(f"成功锁定 {len(locked_rpms)} 个 RPM 包及其 SHA256！")
           PYEOF
-          '
 
-          # 3. 合成最终的 rpms.lock.json（包含 imageDigest 和 nix sha256）
+          # 4. 合成最终的 rpms.lock.json（包含 imageDigest 和 nix sha256）
           jq -n \
             --arg imgName "${spec.baseImage.name}" \
             --arg imgTag "${spec.baseImage.tag}" \
