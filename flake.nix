@@ -14,7 +14,7 @@
       # 自动化依赖解析与 SHA256 锁定脚本（运行 `nix run .#lock` 时触发）
       lockScript = pkgs.writeShellApplication {
         name = "lock-opensuse-rpms";
-        runtimeInputs = [ pkgs.podman pkgs.python3 pkgs.jq pkgs.nix-prefetch-docker ];
+        runtimeInputs = [ pkgs.python3 pkgs.jq pkgs.nix-prefetch-docker ];
         text = ''
           set -euo pipefail
           echo ">>> 1. 解析基础镜像 Digest 与 Nix SHA256..."
@@ -30,7 +30,7 @@
           ${builtins.toJSON spec}
           EOF
 
-          podman run --rm -v "$TMP_DIR:/work:Z" "${spec.baseImage.name}:${spec.baseImage.tag}" /bin/bash -c '
+          docker run --rm -v "$TMP_DIR:/work" "${spec.baseImage.name}:${spec.baseImage.tag}" /bin/bash -c '
             set -e
             python3 - << "PYEOF"
           import json, subprocess, gzip, xml.etree.ElementTree as ET, os
