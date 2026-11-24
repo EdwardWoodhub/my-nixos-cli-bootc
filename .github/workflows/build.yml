@@ -74,7 +74,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 7. 还原 SUID、初始化用户、生成 initramfs、校验 bootc 规范并推送到 GHCR
+      # 7. 刷新动态库与 SUID、初始化用户、生成 modules.dep 与 initramfs、校验 bootc 规范并推送到 GHCR
       - name: Finalize System, Lint & Push to GHCR
         run: |
           docker load < result
@@ -82,7 +82,8 @@ jobs:
           # 在完整合并的根文件系统中执行收尾与 bootc 合规性检查
           docker run --name bootc-finalize my-opensuse-fhs-bootc:latest /bin/bash -c '
             set -e
-            # 1. 还原被 Nix Store 剥离的 SUID 特殊权限位
+            # 1. 刷新动态链接库缓存并还原被 Nix Store 剥离的 SUID 特殊权限位
+            ldconfig
             chmod 4755 /usr/bin/sudo || true
             chmod 4750 /usr/libexec/dbus-1/dbus-daemon-launch-helper || true
 
@@ -101,10 +102,11 @@ jobs:
               rm -f /usr/lib/os-release.append
             fi
 
-            # 4. 满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz 与 initramfs.img)
+            # 4. 生成 modules.dep 并满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz 与 initramfs.img)
             KVER=$(ls -1 /usr/lib/modules | head -n 1)
             [ -f "/boot/vmlinuz-$KVER" ] && mv "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"
-            dracut --force --kver "$KVER" "/usr/lib/modules/$KVER/initramfs.img"
+            depmod -a "$KVER"
+            dracut --force --no-hostonly --no-hostonly-cmdline --kver "$KVER" "/usr/lib/modules/$KVER/initramfs.img"
             rm -rf /boot/* /var/cache/* /tmp/*
 
             # 5. 执行 bootc 官方镜像规范校验
