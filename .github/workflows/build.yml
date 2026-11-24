@@ -117,15 +117,7 @@ jobs:
               rm -rf /usr/etc
             fi
 
-            # 6. [新增] 扫描并清理全盘指向根目录之外或无效的越界软链接（防止 bootc lint 报错）
-            find / -xdev -type l | while read -r link; do
-              target=$(readlink "$link")
-              # 清理指向 /nix/store 的残留链接，或解析路径越界（realpath -m 报错）的软链接
-              if [[ "$target" == /nix/store* ]] || ! realpath -m "$link" >/dev/null 2>&1; then
-                echo "Removing invalid/escaping symlink: $link -> $target"
-                rm -f "$link"
-              fi
-            done
+            
             
             # 6. 执行 bootc 官方镜像规范校验
             bootc container lint
