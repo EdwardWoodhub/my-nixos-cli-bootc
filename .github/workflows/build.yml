@@ -1,0 +1,105 @@
+name: Build Pure-FHS openSUSE bootc Image With Nix
+
+on:
+  # 1. 每天北京时间 02:01 (UTC 18:01) 定时执行（自动检查上游 RPM 更新并重锁哈希）
+  schedule:
+    - cron: '01 18 * * *'
+
+  # 2. 当 main 分支有非文档变更时触发
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+
+  # 3. 支持手动点击运行
+  workflow_dispatch:
+
+permissions:
+  contents: write # 允许自动提交更新后的 rpms.lock.json 及创建 Release
+  packages: write # 允许向 GHCR 推送镜像
+
+jobs:
+  build-and-sync:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 1. 安装 Nix 工具链并开启 Flakes
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # 2. 启用 GitHub Actions 原生 Nix Store 缓存（核心！实现未变动 RPM Derivation 秒级复用）
+      - name: Setup Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # 3. 自动解析依赖并更新 rpms.lock.json（定时任务或修改 packages.nix 后自动刷新）
+      - name: Lock openSUSE RPMs & Base Image SHA256
+        run: |
+          # 如果不存在 lock 文件、或者定时触发、或者本次提交修改了 packages.nix，则重新锁定依赖
+          if [ ! -f rpms.lock.json ] || [ "${{ github.event_name }}" == "schedule" ] || git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q "packages.nix"; then
+            echo ">>> 检测到依赖变更或定时更新，正在自动生成 rpms.lock.json..."
+            nix run .#lock
+          else
+            echo ">>> packages.nix 未变更，直接复用现有 rpms.lock.json 确定性构建"
+          fi
+
+      # 4. 若 rpms.lock.json 有变动，自动 commit 回仓库（带 [skip ci] 防止死循环）
+      - name: Commit Updated Lockfile
+        run: |
+          if [[ -n $(git status -s rpms.lock.json) ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add rpms.lock.json
+            git commit -m "chore(lock): update rpms.lock.json [skip ci]"
+            git push
+          fi
+
+      # 5. 使用 Flake 构建纯 FHS bootc 多层镜像
+      - name: Build Layered FHS bootc Image
+        run: |
+          nix build .#default -o result
+
+      # 6. 登录 GHCR
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 7. 加载并推送到 GHCR（利用 buildLayeredImage 的 100 层切片，仅上传变动的 Blob）
+      - name: Push to GHCR
+        run: |
+          docker load < result
+
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          GHCR_IMAGE="ghcr.io/${REPO_OWNER}/my-opensuse-fhs-bootc:latest"
+
+          docker tag my-opensuse-fhs-bootc:latest "$GHCR_IMAGE"
+          echo ">>> 正在增量推送到 GHCR: $GHCR_IMAGE"
+          docker push "$GHCR_IMAGE"
+
+      # 8. 使用 Skopeo 同步镜像到阿里云 ACR（保持与你原有 ACR 仓库同步）
+      - name: Sync Image from GHCR to Aliyun ACR using Skopeo
+        run: |
+          sudo apt-get update && sudo apt-get install -y skopeo
+
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SRC_IMAGE="docker://ghcr.io/${REPO_OWNER}/my-opensuse-fhs-bootc:latest"
+          DEST_IMAGE="docker://${{ secrets.ALIYUN_ACR_REGISTRY }}/edwardwoodhub/my-opensuse-fhs-bootc:latest"
+
+          echo ">>> 正在使用 Skopeo 同步镜像到阿里云 ACR..."
+          skopeo copy \
+            --src-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --dest-creds="${{ secrets.ALIYUN_ACR_USERNAME }}:${{ secrets.ALIYUN_ACR_PASSWORD }}" \
+            "$SRC_IMAGE" "$DEST_IMAGE"
+
+          echo ">>> 同步完成！"
