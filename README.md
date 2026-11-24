@@ -1,0 +1,1 @@
+# my-opensuse-cli-nix
