@@ -57,7 +57,7 @@
 
           echo ">>> 3. 使用 Nix Python 解析 repodata 提取所有依赖 URL 与 SHA256..."
           TMP_DIR="$TMP_DIR" python3 - << 'PYEOF'
-          import json, gzip, io, xml.etree.ElementTree as ET, os
+          import json, gzip, xml.etree.ElementTree as ET, os
           from compression import zstd
 
           def open_metadata(path):
