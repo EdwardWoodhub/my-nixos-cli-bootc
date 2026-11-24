@@ -107,6 +107,9 @@ pkgs.dockerTools.buildLayeredImage {
   tag = imageTag;
   fromImage = baseImage;
 
+  # [新增] 强制将所有文件实体打包进镜像层，禁止生成指向 /nix/store 的软链接
+  includeStorePaths = false;
+
   # 每个 RPM Derivation 自动分配独立 OCI Layer（最多 100 层），实现修改单个包秒级增量推送
   maxLayers = 100;
   contents = unpackedRpms ++ [ systemConfigLayer ];
