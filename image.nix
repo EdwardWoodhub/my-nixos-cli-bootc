@@ -109,9 +109,7 @@ pkgs.dockerTools.buildLayeredImage {
 
   # 每个 RPM Derivation 自动分配独立 OCI Layer（最多 100 层），实现修改单个包秒级增量推送
   maxLayers = 100;
-
-  # 使用 copyToRoot 替代 contents，强制物理复制实体文件，绝不生成指向 /nix/store 的软链接
-  copyToRoot = unpackedRpms ++ [ systemConfigLayer ];
+  contents = unpackedRpms ++ [ systemConfigLayer ];
 
   # fakeRootCommands 运行在独立的顶层目录中，创建 OSTree 标准目录结构
   fakeRootCommands = ''
