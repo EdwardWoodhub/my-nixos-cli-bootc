@@ -5,7 +5,6 @@
 let
   imageRepo = "ghcr.io/edwardwoodhub/my-opensuse-fhs-bootc";
   imageTag = "latest";
-  passwordHash = "$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.";
 
   # 1. 拉取确定性基础镜像（不包含任何 /nix/store）
   baseImage = pkgs.dockerTools.pullImage {
@@ -16,9 +15,9 @@ let
     finalImageTag = lockData.baseImage.tag;
   };
 
-  # 2. 将单个 RPM 声明转换为独立的 FHS 目录 Derivation（实现包粒度缓存复用）
+  # 2. 将单个 RPM 声明转换为独立的 FHS 目录 Derivation（剥离 SUID/SGID 以符合 Nix Store 规范）
   unpackRpm = rpmSpec: pkgs.runCommand "fhs-rpm-${rpmSpec.name}-${rpmSpec.evr}" {
-    nativeBuildInputs = [ pkgs.rpmextract ];
+    nativeBuildInputs = [ pkgs.rpm pkgs.cpio pkgs.fakeroot ];
     src = pkgs.fetchurl {
       url = rpmSpec.url;
       sha256 = rpmSpec.sha256;
@@ -26,7 +25,9 @@ let
   } ''
     mkdir -p $out
     cd $out
-    rpmextract $src
+    fakeroot bash -c 'rpm2cpio "$1" | cpio -idm --no-preserve-owner --quiet' _ "$src"
+    chmod -R ug-s . || true
+
     # 规范化 UsrMerge（防止部分旧 RPM 往 /bin /sbin /lib 写文件导致 OSTree 报错）
     for dir in bin sbin lib lib64; do
       if [ -d "$dir" ] && [ ! -L "$dir" ]; then
@@ -39,19 +40,23 @@ let
 
   unpackedRpms = map unpackRpm lockData.rpms;
 
-  # 3. 声明式系统配置层（/etc, systemd 服务, 用户目录与 bootc 规范化）
+  # 3. 声明式系统配置层（/etc 独立配置文件、systemd 服务与元数据暂存）
   systemConfigLayer = pkgs.runCommand "fhs-system-config" {} ''
     mkdir -p $out/etc/profile.d \
+             $out/etc/sudoers.d \
              $out/etc/dracut.conf.d \
-             $out/etc/systemd/system/multi-user.target.wants \
-             $out/var/home/peter/winShare \
-             $out/var/home/liveuser
+             $out/etc/systemd/system/multi-user.target.wants
 
     # 暴露 /usr/local/bin、/usr/sbin 与 /sbin
     cat <<'EOF' > $out/etc/profile.d/custom-sbin-path.sh
     export PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin"
     EOF
     chmod 644 $out/etc/profile.d/custom-sbin-path.sh
+
+    # 免密 wheel sudo 独立配置
+    echo '%wheel ALL=(ALL) NOPASSWD: ALL' > $out/etc/sudoers.d/90-wheel-nopasswd
+    echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' >> $out/etc/sudoers.d/90-wheel-nopasswd
+    chmod 440 $out/etc/sudoers.d/90-wheel-nopasswd
 
     # Dracut 通用与 OSTree 模块配置
     echo 'hostonly="no"' > $out/etc/dracut.conf.d/02-generic.conf
@@ -100,34 +105,10 @@ pkgs.dockerTools.buildLayeredImage {
   maxLayers = 100;
   contents = unpackedRpms ++ [ systemConfigLayer ];
 
-  # buildLayeredImage 默认即在 fakeRoot 下运行，无需 enableFakeRoot 参数
+  # fakeRootCommands 运行在独立的顶层目录中，仅创建 OSTree 标准 /home -> /var/home 映射
   fakeRootCommands = ''
-    # 1. 遵循 OSTree / bootc 规范将 /home 指向 /var/home
-    rm -rf home
+    mkdir -p var/home
     ln -s var/home home
-
-    # 2. 创建用户并注入加盐哈希密码
-    grep -q '^wheel:' etc/group || echo 'wheel:x:10:' >> etc/group
-    echo 'liveuser:x:1000:100::/var/home/liveuser:/bin/bash' >> etc/passwd
-    echo 'peter:x:1001:100::/var/home/peter:/bin/bash' >> etc/passwd
-    echo 'liveuser:${passwordHash}:19000:0:99999:7:::' >> etc/shadow
-    echo 'peter:${passwordHash}:19000:0:99999:7:::' >> etc/shadow
-    sed -i 's|^root:[^:]*:|root:${passwordHash}:|' etc/shadow
-    sed -i 's|^wheel:x:10:.*|wheel:x:10:liveuser,peter|' etc/group
-    echo '%wheel ALL=(ALL) NOPASSWD: ALL' >> etc/sudoers
-    chown -R 1000:100 var/home/liveuser
-    chown -R 1001:100 var/home/peter
-
-    # 3. 合并 os-release 元数据
-    cat usr/lib/os-release.append >> usr/lib/os-release
-    rm -f usr/lib/os-release.append
-
-    # 4. 满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz)
-    KVER=$(ls -1 usr/lib/modules | head -n 1)
-    if [ -n "$KVER" ] && [ -f "boot/vmlinuz-$KVER" ]; then
-      mv "boot/vmlinuz-$KVER" "usr/lib/modules/$KVER/vmlinuz"
-    fi
-    rm -rf boot/*
   '';
 
   config = {
