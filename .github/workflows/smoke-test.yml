@@ -17,7 +17,6 @@ env:
 jobs:
   smoke-test-iso:
     runs-on: ubuntu-24.04
-    # 修改这里：使用反向排除法，确保手动触发（workflow_dispatch）100% 不会被跳过
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
@@ -53,14 +52,15 @@ jobs:
         run: |
           cp /usr/share/OVMF/OVMF_VARS_4M.fd ./OVMF_VARS.fd
 
-          echo ">>> 启动无头 QEMU 虚拟机测试 LiveCD 引导（超时限制 8 分钟）..."
+          echo ">>> 启动无头 QEMU 虚拟机测试 LiveCD 引导（超时限制 10 分钟）..."
           python3 - << 'EOF'
-          import subprocess, time, sys, os
+          import subprocess, time, sys, os, select
 
           cmd = [
               "qemu-system-x86_64",
               "-m", "4096",
-              "-smp", "2",
+              "-smp", "4",
+              "-cpu", "max",
               "-nographic",
               "-serial", "mon:stdio",
               "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
@@ -72,14 +72,20 @@ jobs:
 
           proc = subprocess.Popen(
               cmd,
+              stdin=subprocess.PIPE,
               stdout=subprocess.PIPE,
               stderr=subprocess.STDOUT,
-              text=True,
-              errors="replace"
+              bufsize=0
           )
 
+          fd = proc.stdout.fileno()
+          os.set_blocking(fd, False)
+
           start_time = time.time()
-          timeout = 480
+          timeout = 600  # 严格 10 分钟非阻塞超时
+          sent_boot_keys = False
+          buffer = ""
+
           success_markers = [
               "login:",
               "Reached target Graphical Interface",
@@ -94,32 +100,61 @@ jobs:
 
           matched = False
           while True:
-              if time.time() - start_time > timeout:
-                  print("\n[ERROR] QEMU 冒烟测试超时！", file=sys.stderr)
+              elapsed = time.time() - start_time
+              if elapsed > timeout:
+                  print(f"\n[ERROR] QEMU 冒烟测试达到 {timeout} 秒严格超时！", file=sys.stderr)
                   proc.kill()
                   sys.exit(1)
 
-              line = proc.stdout.readline()
-              if not line:
+              rlist, _, _ = select.select([fd], [], [], 1.0)
+              if rlist:
+                  try:
+                      chunk = os.read(fd, 4096)
+                  except BlockingIOError:
+                      chunk = b""
+                  if not chunk:
+                      if proc.poll() is not None:
+                          break
+                      continue
+
+                  text = chunk.decode("utf-8", errors="replace")
+                  sys.stdout.write(text)
+                  sys.stdout.flush()
+                  buffer += text
+
+                  # 检测到 systemd-boot 菜单提示时，自动发送 't' 和回车触发立即引导
+                  if not sent_boot_keys and "Press 't' to use the text boot menu" in buffer:
+                      print("\n>>> [AUTO-INPUT] 检测到引导菜单，自动发送按键启动默认内核...")
+                      time.sleep(1)
+                      proc.stdin.write(b"t\r")
+                      proc.stdin.flush()
+                      time.sleep(1)
+                      proc.stdin.write(b"\r")
+                      proc.stdin.flush()
+                      sent_boot_keys = True
+
+                  for err in fatal_markers:
+                      if err in buffer:
+                          print(f"\n[ERROR] 检测到致命启动错误: {err}", file=sys.stderr)
+                          proc.kill()
+                          sys.exit(1)
+
+                  for ok in success_markers:
+                      if ok in buffer:
+                          print(f"\n[SUCCESS] LiveCD 成功完成 UEFI 引导并进入用户态！匹配标志: {ok}")
+                          matched = True
+                          proc.terminate()
+                          break
+
+                  if matched:
+                      break
+
+                  # 防止内存缓冲区无限增长，只保留最近 16KB 文本用于关键字匹配
+                  if len(buffer) > 16384:
+                      buffer = buffer[-8192:]
+              else:
                   if proc.poll() is not None:
                       break
-                  time.sleep(0.1)
-                  continue
-
-              sys.stdout.write(line)
-              sys.stdout.flush()
-
-              for err in fatal_markers:
-                  if err in line:
-                      print(f"\n[ERROR] 检测到致命启动错误: {err}", file=sys.stderr)
-                      proc.kill()
-                      sys.exit(1)
-
-              if any(m in line for m in success_markers):
-                  print(f"\n[SUCCESS] LiveCD 成功完成 UEFI 引导并进入用户态！触发关键字: {line.strip()}")
-                  matched = True
-                  proc.terminate()
-                  break
 
           if not matched:
               print("\n[ERROR] QEMU 提前退出且未检测到成功启动标志！", file=sys.stderr)
