@@ -1,0 +1,130 @@
+name: Smoke Test LiveCD ISO
+
+on:
+  # 1. 当主构建流水线成功完成后自动触发
+  workflow_run:
+    workflows: ["Build NixOS Bootc VM"]
+    types:
+      - completed
+
+  # 2. 也支持在 GitHub 网页手动触发测试最新 Release
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: my-nixos-cli-bootc-vm
+
+jobs:
+  smoke-test-iso:
+    runs-on: ubuntu-24.04
+    # 仅在主构建成功（或手动触发）时运行
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Install QEMU and ISO Inspection Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf xorriso gh
+
+      - name: Download Latest Release ISO Parts and Reassemble
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo ">>> 获取最新 Release 信息..."
+          LATEST_TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName')
+          echo ">>> 正在下载 Release: $LATEST_TAG"
+          gh release download "$LATEST_TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "${{ env.IMAGE_NAME }}.iso.part-*"
+
+          echo ">>> 合并分卷恢复完整 ISO..."
+          cat ${{ env.IMAGE_NAME }}.iso.part-* > ${{ env.IMAGE_NAME }}.iso
+          rm -f ${{ env.IMAGE_NAME }}.iso.part-*
+          ls -lh ${{ env.IMAGE_NAME }}.iso
+
+      - name: Static ISO Structure & Boot Record Check
+        run: |
+          echo ">>> 检查 ISO 9660 卷标与 El Torito / EFI 引导记录..."
+          xorriso -indev ${{ env.IMAGE_NAME }}.iso -toc 2>&1 | tee iso-toc.log
+          grep -q "NIXOS_BOOTC" iso-toc.log
+          echo ">>> ISO 静态结构校验通过！"
+
+      - name: Boot LiveCD in Headless QEMU (UEFI Smoke Test)
+        run: |
+          # 复制可写的 OVMF UEFI 变量文件
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd ./OVMF_VARS.fd
+
+          echo ">>> 启动无头 QEMU 虚拟机测试 LiveCD 引导（超时限制 8 分钟）..."
+          python3 - << 'EOF'
+          import subprocess, time, sys, os
+
+          cmd = [
+              "qemu-system-x86_64",
+              "-m", "4096",
+              "-smp", "2",
+              "-nographic",
+              "-serial", "mon:stdio",
+              "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+              "-drive", "if=pflash,format=raw,file=./OVMF_VARS.fd",
+              "-cdrom", os.environ["IMAGE_NAME"] + ".iso",
+              "-boot", "d",
+              "-no-reboot"
+          ]
+
+          proc = subprocess.Popen(
+              cmd,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              errors="replace"
+          )
+
+          start_time = time.time()
+          timeout = 480  # 8 分钟（无 KVM 软件模拟环境下足够完成 NixOS Stage 1 + Stage 2 启动）
+          success_markers = [
+              "login:",
+              "Reached target Graphical Interface",
+              "Reached target Multi-User System",
+              "Welcome to NixOS"
+          ]
+          fatal_markers = [
+              "Kernel panic",
+              "You are in emergency mode",
+              "Failed to mount"
+          ]
+
+          matched = False
+          while True:
+              if time.time() - start_time > timeout:
+                  print("\n[ERROR] QEMU 冒烟测试超时！", file=sys.stderr)
+                  proc.kill()
+                  sys.exit(1)
+
+              line = proc.stdout.readline()
+              if not line:
+                  if proc.poll() is not None:
+                      break
+                  time.sleep(0.1)
+                  continue
+
+              sys.stdout.write(line)
+              sys.stdout.flush()
+
+              for err in fatal_markers:
+                  if err in line:
+                      print(f"\n[ERROR] 检测到致命启动错误: {err}", file=sys.stderr)
+                      proc.kill()
+                      sys.exit(1)
+
+              if any(m in line for m in success_markers):
+                  print(f"\n[SUCCESS] LiveCD 成功完成 UEFI 引导并进入用户态！触发关键字: {line.strip()}")
+                  matched = True
+                  proc.terminate()
+                  break
+
+          if not matched:
+              print("\n[ERROR] QEMU 提前退出且未检测到成功启动标志！", file=sys.stderr)
+              sys.exit(1)
+          EOF
