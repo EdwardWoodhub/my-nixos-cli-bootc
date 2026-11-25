@@ -1,13 +1,11 @@
 name: Smoke Test LiveCD ISO
 
 on:
-  # 1. 当主构建流水线成功完成后自动触发
   workflow_run:
     workflows: ["Build NixOS Bootc VM"]
     types:
       - completed
 
-  # 2. 也支持在 GitHub 网页手动触发测试最新 Release
   workflow_dispatch:
 
 permissions:
@@ -19,8 +17,8 @@ env:
 jobs:
   smoke-test-iso:
     runs-on: ubuntu-24.04
-    # 仅在主构建成功（或手动触发）时运行
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # 修改这里：使用反向排除法，确保手动触发（workflow_dispatch）100% 不会被跳过
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Install QEMU and ISO Inspection Tools
@@ -53,7 +51,6 @@ jobs:
 
       - name: Boot LiveCD in Headless QEMU (UEFI Smoke Test)
         run: |
-          # 复制可写的 OVMF UEFI 变量文件
           cp /usr/share/OVMF/OVMF_VARS_4M.fd ./OVMF_VARS.fd
 
           echo ">>> 启动无头 QEMU 虚拟机测试 LiveCD 引导（超时限制 8 分钟）..."
@@ -82,7 +79,7 @@ jobs:
           )
 
           start_time = time.time()
-          timeout = 480  # 8 分钟（无 KVM 软件模拟环境下足够完成 NixOS Stage 1 + Stage 2 启动）
+          timeout = 480
           success_markers = [
               "login:",
               "Reached target Graphical Interface",
