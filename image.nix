@@ -64,14 +64,39 @@ let
       cp -a "$store_path" "$out/usr/nix/store/"
     done < ${closureInfo}/store-paths
 
-    # 赋予构建者写权限，以便后续脚本修改符号链接（Nix 构建结束时会自动将 $out 恢复为只读）
+    # 赋予构建者写权限，以便后续脚本规范化符号链接
     chmod -R u+w $out/usr
 
-    # 8. 重写符号链接，防止 bootc/composefs 校验时出现路径逃逸或悬空
+    # 8. 全面规范化符号链接并检测任何逃逸出 $out 根目录的链接
     python3 - << 'EOF'
 import os
 
-out_dir = os.environ["out"]
+out_dir = os.path.abspath(os.environ["out"])
+
+def resolve_in_chroot(root, link_path, target):
+    """模拟 chroot 环境下解析符号链接，判断是否会逃逸出 root 边界"""
+    cur_dir = os.path.dirname(link_path)
+    parts = target.split("/")
+    if target.startswith("/"):
+        cur_rel = ""
+    else:
+        cur_rel = os.path.relpath(cur_dir, root)
+        if cur_rel == ".":
+            cur_rel = ""
+
+    stack = [p for p in cur_rel.split("/") if p]
+    escaped = False
+    for p in parts:
+        if not p or p == ".":
+            continue
+        if p == "..":
+            if not stack:
+                escaped = True
+            else:
+                stack.pop()
+        else:
+            stack.append(p)
+    return escaped, "/" + "/".join(stack)
 
 for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
     for name in filenames + dirnames:
@@ -80,16 +105,24 @@ for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
             continue
         target = os.readlink(full_path)
 
-        # 将指向 /nix/store/... 的绝对链接统一重定向到 /usr/nix/store/...
+        # 规则 A: 重定向 /nix/store/ -> /usr/nix/store/
         if target.startswith("/nix/store/"):
-            new_target = "/usr" + target
+            target = "/usr" + target
             os.unlink(full_path)
-            os.symlink(new_target, full_path)
-        # 修复 /usr/etc 下指向 /etc/static/... 的链接
+            os.symlink(target, full_path)
+
+        # 规则 B: 重定向 /etc/ -> /usr/etc/ (排除 /etc/mtab, /etc/resolv.conf 等运行时动态文件)
         elif target.startswith("/etc/static/"):
-            new_target = "/usr" + target
+            target = "/usr" + target
             os.unlink(full_path)
-            os.symlink(new_target, full_path)
+            os.symlink(target, full_path)
+
+        # 规则 C: 检查是否仍存在 ../ 逃逸出虚拟根目录的链接，将其规范化为安全的虚拟绝对路径
+        escaped, norm_target = resolve_in_chroot(out_dir, full_path, target)
+        if escaped:
+            print(f"[FIX ESCAPED SYMLINK] {os.path.relpath(full_path, out_dir)} -> {target}  ==>  {norm_target}")
+            os.unlink(full_path)
+            os.symlink(norm_target, full_path)
 EOF
 
     # 9. 构建期直接执行 bootc 结构体检
