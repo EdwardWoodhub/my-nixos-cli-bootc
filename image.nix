@@ -12,10 +12,12 @@ let
   kernel = nixos.config.boot.kernelPackages.kernel;
   kver = kernel.modDirVersion;
   initrd = "${nixos.config.system.build.initialRamdisk}/initrd";
+  # 聚合了所有内置与外部内核模块的完整模块树
+  modulesTree = nixos.config.system.modulesTree;
 
-  # 获取当前系统闭包的完整路径列表
+  # 获取当前系统闭包的完整路径列表（需同时包含 toplevel 与 modulesTree）
   closureInfo = pkgs.closureInfo {
-    rootPaths = [ toplevel ];
+    rootPaths = [ toplevel modulesTree ];
   };
 
   # 构建符合 bootc 强制规范的 UsrMerge FHS 骨架与系统布局
@@ -46,15 +48,17 @@ let
     cp -rsf ${toplevel}/etc/systemd/system/* $out/usr/lib/systemd/system/ 2>/dev/null || true
     cp -rsf ${toplevel}/etc/udev/rules.d/* $out/usr/lib/udev/rules.d/ 2>/dev/null || true
 
-    # 5. 生成 OSTree 规范的 /usr/etc（bootc 启动时自动三方合并至 /etc）
-    rsync -aL --ignore-errors ${toplevel}/etc/ $out/usr/etc/ || true
+    # 5. 生成 OSTree 规范的 /usr/etc（不加 -L，原样保留符号链接与 /dev/null mask 单元）
+    rsync -a ${toplevel}/etc/ $out/usr/etc/
     cp -L ${toplevel}/etc/os-release $out/usr/lib/os-release
 
-    # 6. 按照 bootc 规范放置内核、initramfs 与内核模块
+    # 6. 按照 bootc 规范放置内核、initramfs 与聚合后的内核模块
     mkdir -p $out/usr/lib/modules/${kver}
     cp -L ${kernel}/bzImage $out/usr/lib/modules/${kver}/vmlinuz
     cp -L ${initrd} $out/usr/lib/modules/${kver}/initramfs.img
-    rsync -aL ${kernel}/lib/modules/${kver}/ $out/usr/lib/modules/${kver}/
+    if [ -d "${modulesTree}/lib/modules/${kver}" ]; then
+      rsync -aL ${modulesTree}/lib/modules/${kver}/ $out/usr/lib/modules/${kver}/
+    fi
 
     # 7. 将闭包中的所有 /nix/store 实体复制到只读的 /usr/nix/store
     while IFS= read -r store_path; do
