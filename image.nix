@@ -123,7 +123,7 @@ let
       gnugrep
     ];
   } ''
-    mkdir -p $out/{usr/bin,usr/lib/ostree,usr/lib/modules/${kernel.modDirVersion},etc,var,sysroot,ostree,boot,dev,proc,run,tmp,nix/store}
+    mkdir -p $out/{usr/bin,usr/lib/ostree,usr/lib/modules/${kernel.modDirVersion},etc,var,var/tmp,sysroot,ostree,boot,dev,proc,run,tmp,nix/store}
 
     # --- A. 放置内核与 initramfs 到 bootc 约定的标准路径 ---
     cp -L ${kernel}/bzImage $out/usr/lib/modules/${kernel.modDirVersion}/vmlinuz
@@ -214,7 +214,8 @@ pkgs.dockerTools.buildLayeredImage {
   contents = [ bootcRootfs ];
 
   extraCommands = ''
-    # 清理容器打包生成的临时目录，并确保符合 bootc container lint 规范
+    # 确保目录存在并设置符合 bootc container lint 规范的权限与符号链接
+    mkdir -p tmp var var/tmp
     rm -rf var/run
     ln -s /run var/run
     chmod 1777 tmp var/tmp
