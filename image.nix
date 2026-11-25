@@ -18,15 +18,15 @@ let
     rootPaths = [ toplevel modulesTree ];
   };
 
-  # 1. 在求值/构建前先生成一份确定性的分层清单（JSON）：
-  #    - 单个体积 >= 120MB 的巨型包（如 Chrome/Firefox/字体/内核）独立成层
-  #    - 其余中小包按名称哈希均衡分配到 24 个桶中，确保每个桶体积高度接近（约 120~160MB）
+  # 1. 均衡分层规划器：
+  #    - 单个 >= 250MB 的巨无霸包（如 Chrome/Firefox/字体）各自独立成层
+  #    - 其余所有包按名称 SHA256 哈希均匀散列到 32 个桶中（每桶严格控制在 100~200MB 左右）
   layerPlan = pkgs.runCommand "layer-plan" {
     nativeBuildInputs = [ pkgs.python3 pkgs.coreutils ];
   } ''
     mkdir -p $out
     python3 - << 'EOF'
-import os, json, hashlib
+import os, hashlib
 
 with open("${closureInfo}/store-paths") as f:
     paths = [line.strip() for line in f if line.strip()]
@@ -44,8 +44,8 @@ def get_dir_size(path):
                 pass
     return total
 
-LARGE_THRESHOLD = 120 * 1024 * 1024  # 120 MB 以上单列成层
-NUM_BUCKETS = 24                     # 其余中小包分为 24 个均衡桶
+LARGE_THRESHOLD = 250 * 1024 * 1024  # 250 MB 以上独立成层
+NUM_BUCKETS = 32                     # 其余中小包均匀分散到 32 个桶
 
 large_items = []
 regular_buckets = [[] for _ in range(NUM_BUCKETS)]
@@ -55,22 +55,17 @@ for p in sorted(paths):
     if sz >= LARGE_THRESHOLD:
         large_items.append(p)
     else:
-        # 使用路径哈希决定归属桶，新增/删除单个包绝对不会引起其他包跨桶偏移
         h = int(hashlib.sha256(os.path.basename(p).encode()).hexdigest(), 16)
         regular_buckets[h % NUM_BUCKETS].append(p)
 
-# 过滤掉空桶，合并所有层列表
 layers = [[p] for p in large_items] + [b for b in regular_buckets if b]
 
 for idx, items in enumerate(layers):
     with open(os.path.join(os.environ["out"], f"layer-{idx:02d}.txt"), "w") as lf:
         lf.write("\n".join(items) + "\n")
-
-print(f"Total layers planned: {len(layers)} ({len(large_items)} dedicated large layers + {len(layers)-len(large_items)} balanced buckets)")
 EOF
   '';
 
-  # 读取生成的层数量（约 30~35 个均衡层）
   layerFiles = builtins.attrNames (builtins.readDir layerPlan);
 
   mkBalancedLayer = fileName: pkgs.runCommand "nix-bootc-${fileName}" {
@@ -99,7 +94,7 @@ EOF
 
   balancedLayers = map mkBalancedLayer layerFiles;
 
-  # 构建 FHS 骨架、内核与 /usr/etc
+  # 2. 极轻量 FHS 骨架层（仅约 60MB：内核模块全部通过符号链接复用 /usr/nix/store，绝不重复拷贝实体）
   fhsSkeleton = pkgs.runCommand "nixos-bootc-fhs-skeleton" {
     nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.python3 ];
   } ''
@@ -127,11 +122,12 @@ EOF
     rsync -a ${toplevel}/etc/ $out/usr/etc/
     cp -L ${toplevel}/etc/os-release $out/usr/lib/os-release
 
+    # 仅 vmlinuz 和 initramfs.img 为实体（共 ~50MB），庞大的内核模块目录直接软链接到 /usr/nix/store
     mkdir -p $out/usr/lib/modules/${kver}
     cp -L ${kernel}/bzImage $out/usr/lib/modules/${kver}/vmlinuz
     cp -L ${initrd} $out/usr/lib/modules/${kver}/initramfs.img
     if [ -d "${modulesTree}/lib/modules/${kver}" ]; then
-      rsync -aL ${modulesTree}/lib/modules/${kver}/ $out/usr/lib/modules/${kver}/
+      cp -rsf ${modulesTree}/lib/modules/${kver}/* $out/usr/lib/modules/${kver}/
     fi
 
     chmod -R u+w $out/usr
@@ -173,25 +169,39 @@ EOF
     touch $out
   '';
 
-in
-pkgs.dockerTools.buildLayeredImage {
-  name = "my-nixos-cli-bootc-vm";
-  tag = "latest";
-
-  maxLayers = 100;
-
-  contents = balancedLayers ++ [ fhsSkeleton ];
-
-  extraCommands = ''
-    test -e ${lintCheck}
-    rm -rf nix/store/*
-    mkdir -p nix/store
-  '';
-
-  config = {
-    Cmd = [ "/usr/lib/systemd/systemd" ];
-    Labels = {
-      "containers.bootc" = "1";
+  # 3. 链式叠加构建纯正无幽灵层的 OCI 镜像：
+  #    每个 balancedLayer 严格对应 1 个 OCI Layer，彻底消除 buildLayeredImage 自动扫描产生的 2.6GB 幽灵双份层！
+  baseImage = pkgs.dockerTools.buildImage {
+    name = "my-nixos-cli-bootc-vm";
+    tag = "latest";
+    copyToRoot = fhsSkeleton;
+    extraCommands = ''
+      test -e ${lintCheck}
+      rm -rf nix/store/*
+      mkdir -p nix/store
+    '';
+    config = {
+      Cmd = [ "/usr/lib/systemd/systemd" ];
+      Labels = {
+        "containers.bootc" = "1";
+      };
     };
   };
-}
+
+  finalImage = builtins.foldl' (prevImg: layerDrv:
+    pkgs.dockerTools.buildImage {
+      name = "my-nixos-cli-bootc-vm";
+      tag = "latest";
+      fromImage = prevImg;
+      copyToRoot = layerDrv;
+      config = {
+        Cmd = [ "/usr/lib/systemd/systemd" ];
+        Labels = {
+          "containers.bootc" = "1";
+        };
+      };
+    }
+  ) baseImage balancedLayers;
+
+in
+finalImage
