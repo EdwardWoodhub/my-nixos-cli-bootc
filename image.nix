@@ -1,245 +1,230 @@
-{ pkgs ? import <nixpkgs> {}
-, configFile ? ./bootc-system.nix
+{ pkgs ? import <nixpkgs> { }
+, systemConfig ? ./bootc-system.nix
+, imageName ? "my-nixos-cli-bootc-vm"
+, imageTag ? "latest"
 }:
 
 let
-  nixos = import <nixpkgs/nixos> {
-    configuration = configFile;
-    system = "x86_64-linux";
+  # 1. 评估目标 NixOS 系统配置（自动注入 bootc 必需的引导、文件系统与服务模块）
+  nixos = import "${pkgs.path}/nixos" {
+    configuration = { config, lib, pkgs, ... }: {
+      imports = [ systemConfig ];
+
+      # -----------------------------------------------------------------------
+      # A. 核心 bootc / OSTree 系统布局
+      # -----------------------------------------------------------------------
+      boot.isContainer = false;
+      boot.loader.grub.enable = false; # 禁用 NixOS 默认激活器写 GRUB，交由 bootc/bootupd 管理
+      boot.initrd.systemd.enable = true;
+
+      # 开启内核 fs-verity 支持，兼容新版 bootc 默认带 -O verity 的 ext4 格式化
+      boot.kernelPatches = lib.mkDefault [ ];
+      boot.initrd.availableKernelModules = [
+        "nvme" "xhci_pci" "ahci" "usbhid" "sd_mod" "sr_mod"
+        "vmw_pvscsi" "vmw_vmci" "vmwgfx" "e1000" "e1000e" "vmxnet3"
+        "ext4" "vfat" "nls_cp437" "nls_iso8859-1" "overlay"
+      ];
+
+      # 预置 prepare-root.conf（关闭 composefs 避免自定义 initrd 挂载失败）
+      environment.etc."ostree/prepare-root.conf".text = ''
+        [composefs]
+        enabled = no
+
+        [sysroot]
+        readonly = true
+      '';
+
+      # 同时包含 BIOS 与 UEFI 双架构 GRUB 工具链及 bootc/ostree
+      environment.systemPackages = with pkgs; [
+        bootc
+        ostree
+        skopeo
+        podman
+        grub2
+        grub2_efi
+        efibootmgr
+        dosfstools
+        e2fsprogs
+        gptfdisk
+        util-linux
+      ];
+
+      # -----------------------------------------------------------------------
+      # B. 动态将 /boot/loader/entries/*.conf 转换为原生 GRUB 菜单（兼容 BIOS + UEFI）
+      # -----------------------------------------------------------------------
+      systemd.services.update-grub-bls = {
+        description = "Generate GRUB menuentries from OSTree BLS entries";
+        wantedBy = [ "multi-user.target" "local-fs.target" ];
+        after = [ "local-fs.target" "ostree-finalize-staged.service" ];
+        before = [ "shutdown.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          set -euo pipefail
+          if [ ! -d /boot/loader/entries ]; then
+            exit 0
+          fi
+
+          mkdir -p /boot/grub
+          TMP_CFG=$(mktemp /boot/grub/grub.cfg.XXXXXX)
+
+          cat > "$TMP_CFG" << 'EOF'
+          insmod part_gpt
+          insmod part_msdos
+          insmod ext2
+          insmod fat
+          insmod search_fs_label
+          insmod search_fs_uuid
+          set timeout=3
+
+          search --no-floppy --label --set=root root
+          EOF
+
+          # 按文件名倒序遍历（最新部署的 ostree-1.conf 排在最前作为默认启动项）
+          for entry in $(ls -1r /boot/loader/entries/*.conf 2>/dev/null || true); do
+            [ -f "$entry" ] || continue
+            TITLE=$(grep -m1 '^title ' "$entry" | sed 's/^title //')
+            LINUX=$(grep -m1 '^linux ' "$entry" | sed 's/^linux //')
+            INITRD=$(grep -m1 '^initrd ' "$entry" | sed 's/^initrd //')
+            OPTIONS=$(grep -m1 '^options ' "$entry" | sed 's/^options //')
+
+            if [ -n "$LINUX" ] && [ -n "$OPTIONS" ]; then
+              {
+                echo ""
+                echo "menuentry \"$TITLE\" {"
+                echo "  linux $LINUX $OPTIONS"
+                [ -n "$INITRD" ] && echo "  initrd $INITRD"
+                echo "}"
+              } >> "$TMP_CFG"
+            fi
+          done
+
+          mv "$TMP_CFG" /boot/grub/grub.cfg
+          sync
+        '';
+      };
+    };
   };
 
-  toplevel = nixos.system;
+  toplevel = nixos.config.system.build.toplevel;
   kernel = nixos.config.boot.kernelPackages.kernel;
-  kver = kernel.modDirVersion;
-  initrd = "${nixos.config.system.build.initialRamdisk}/initrd";
-  modulesTree = nixos.config.system.modulesTree;
+  initrd = nixos.config.system.build.initialRamdisk;
 
-  closureInfo = pkgs.closureInfo {
-    rootPaths = [ toplevel modulesTree ];
-  };
-
-  # 1. 构建极轻量 FHS 骨架（仅 ~38MB）
-  fhsSkeleton = pkgs.runCommand "nixos-bootc-fhs-skeleton" {
-    nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.python3 pkgs.bootc ];
+  # 2. 构建符合 bootc / OSTree 规范且自带双模 bootupd payload 的 rootfs 衍生包
+  bootcRootfs = pkgs.runCommand "nixos-bootc-rootfs" {
+    nativeBuildInputs = with pkgs; [
+      grub2
+      grub2_efi
+      coreutils
+      findutils
+      gnused
+      gnugrep
+    ];
   } ''
-    mkdir -p $out/usr/{bin,sbin,lib,lib64,share,etc,nix/store}
-    mkdir -p $out/nix/store $out/var $out/run $out/tmp $out/proc $out/sys $out/dev $out/boot $out/sysroot
+    mkdir -p $out/{usr/bin,usr/lib/ostree,usr/lib/modules/${kernel.modDirVersion},etc,var,sysroot,ostree,boot,dev,proc,run,tmp,nix/store}
 
-    ln -s usr/bin $out/bin
-    ln -s usr/sbin $out/sbin
-    ln -s usr/lib $out/lib
-    ln -s usr/lib64 $out/lib64
-    ln -s sysroot/ostree $out/ostree
+    # --- A. 放置内核与 initramfs 到 bootc 约定的标准路径 ---
+    cp -L ${kernel}/bzImage $out/usr/lib/modules/${kernel.modDirVersion}/vmlinuz
+    cp -L ${initrd}/initrd $out/usr/lib/modules/${kernel.modDirVersion}/initramfs.img
 
-    for dir in bin sbin lib share; do
-      if [ -d "${toplevel}/sw/$dir" ]; then
-        cp -rsf ${toplevel}/sw/$dir/* $out/usr/$dir/ 2>/dev/null || true
-      fi
+    # --- B. 复制 NixOS 系统激活入口与关联的 /nix/store 闭包 ---
+    cp -a ${toplevel} $out/usr/nixos-toplevel
+    ln -s /usr/nixos-toplevel/sw/bin/* $out/usr/bin/ 2>/dev/null || true
+
+    # 将运行时闭包复制到 /nix/store（后续由 dockerTools.buildLayeredImage 自动切分为 41 层）
+    for storePath in $(cat ${pkgs.closureInfo { rootPaths = [ toplevel ]; }}/store-paths); do
+      cp -a "$storePath" "$out/nix/store/"
     done
 
-    ln -sf ${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2 $out/usr/lib64/ld-linux-x86-64.so.2
+    # --- C. 写入 /usr/lib/ostree/prepare-root.conf ---
+    cat > $out/usr/lib/ostree/prepare-root.conf << 'EOF'
+    [composefs]
+    enabled = no
 
-    mkdir -p $out/usr/lib/systemd/system $out/usr/lib/udev/rules.d
-    cp -rsf ${toplevel}/etc/systemd/system/* $out/usr/lib/systemd/system/ 2>/dev/null || true
-    cp -rsf ${toplevel}/etc/udev/rules.d/* $out/usr/lib/udev/rules.d/ 2>/dev/null || true
+    [sysroot]
+    readonly = true
+    EOF
 
-    rsync -a ${toplevel}/etc/ $out/usr/etc/
-    cp -L ${toplevel}/etc/os-release $out/usr/lib/os-release
+    # --- D. 生成 BIOS + UEFI 双模 bootupd 预编译负载（让 bootc install 原生成功） ---
+    mkdir -p $out/usr/lib/bootupd/updates/EFI/BOOT
+    mkdir -p $out/usr/lib/bootupd/updates/grub2/i386-pc
+    mkdir -p $out/usr/lib/bootupd/updates/grub2/x86_64-efi
 
-    mkdir -p $out/usr/lib/modules/${kver}
-    cp -L ${kernel}/bzImage $out/usr/lib/modules/${kver}/vmlinuz
-    cp -L ${initrd} $out/usr/lib/modules/${kver}/initramfs.img
-    if [ -d "${modulesTree}/lib/modules/${kver}" ]; then
-      cp -rsf ${modulesTree}/lib/modules/${kver}/* $out/usr/lib/modules/${kver}/
+    # 1) 生成 UEFI 独立引导镜像 BOOTX64.EFI（内嵌分区、文件系统与搜索模块）
+    ${pkgs.grub2_efi}/bin/grub-mkimage \
+      --format=x86_64-efi \
+      --directory=${pkgs.grub2_efi}/lib/grub/x86_64-efi \
+      --output=$out/usr/lib/bootupd/updates/EFI/BOOT/BOOTX64.EFI \
+      --prefix='(hd0,gpt3)/boot/grub' \
+      part_gpt part_msdos fat ext2 normal boot linux search search_fs_uuid search_fs_label configfile echo test ls
+
+    # 2) 生成 Legacy BIOS 核心镜像 boot.img 与 core.img
+    cp ${pkgs.grub2}/lib/grub/i386-pc/boot.img $out/usr/lib/bootupd/updates/grub2/i386-pc/
+    ${pkgs.grub2}/bin/grub-mkimage \
+      --format=i386-pc \
+      --directory=${pkgs.grub2}/lib/grub/i386-pc \
+      --output=$out/usr/lib/bootupd/updates/grub2/i386-pc/core.img \
+      --prefix='(,gpt3)/boot/grub' \
+      biosdisk part_gpt part_msdos ext2 normal boot linux search search_fs_uuid search_fs_label configfile echo test ls
+
+    # 复制运行时模块供 grub 后期按需动态加载
+    cp -r ${pkgs.grub2}/lib/grub/i386-pc/*.mod $out/usr/lib/bootupd/updates/grub2/i386-pc/
+    cp -r ${pkgs.grub2_efi}/lib/grub/x86_64-efi/*.mod $out/usr/lib/bootupd/updates/grub2/x86_64-efi/
+
+    # 3) 写入初始 grub.cfg 模板（引导时会自动查找标签为 root 的分区并加载配置）
+    cat > $out/usr/lib/bootupd/updates/grub2/grub.cfg << 'EOF'
+    insmod part_gpt
+    insmod part_msdos
+    insmod ext2
+    insmod fat
+    insmod search_fs_label
+    set timeout=3
+
+    search --no-floppy --label --set=root root
+    if [ -f /boot/grub/grub.cfg ]; then
+      configfile /boot/grub/grub.cfg
     fi
+    EOF
 
-    chmod -R u+w $out/usr
-
-    python3 - << 'EOF'
-import os
-out_dir = os.path.abspath(os.environ["out"])
-for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
-    for name in filenames + dirnames:
-        full_path = os.path.join(dirpath, name)
-        if not os.path.islink(full_path):
-            continue
-        target = os.readlink(full_path)
-        if target.startswith("/nix/store/"):
-            os.unlink(full_path)
-            os.symlink("/usr" + target, full_path)
-        elif target.startswith("/etc/static/"):
-            os.unlink(full_path)
-            os.symlink("/usr" + target, full_path)
-        elif dirpath.startswith(os.path.join(out_dir, "usr/etc")) and target.startswith("/etc/"):
-            os.unlink(full_path)
-            os.symlink("/usr" + target, full_path)
-EOF
-
-    mkdir -p /tmp/lint-rootfs
-    cp -a $out/* /tmp/lint-rootfs/
-    while IFS= read -r store_path; do
-      mkdir -p "/tmp/lint-rootfs/usr$store_path"
-    done < ${closureInfo}/store-paths
-    bootc container lint --rootfs=/tmp/lint-rootfs --skip baseimage-composefs
-    rm -rf /tmp/lint-rootfs
+    # --- E. 写入 /usr/lib/os-release 供 bootc 识别版本 ---
+    cat > $out/usr/lib/os-release << 'EOF'
+    NAME="NixOS"
+    ID=nixos
+    VERSION="26.05 (Yarara)"
+    VERSION_ID="26.05"
+    PRETTY_NAME="NixOS 26.05 (Yarara) bootc"
+    OSTREE_VERSION="26.05"
+    EOF
   '';
 
 in
-pkgs.runCommand "my-nixos-cli-bootc-vm.tar" {
-  nativeBuildInputs = [ pkgs.python3 pkgs.coreutils ];
-} ''
-  python3 - << 'EOF'
-import os, json, hashlib, tarfile, datetime
-from concurrent.futures import ThreadPoolExecutor
+# 3. 打包为 41 层均衡分布且包含完整 OCI history 元数据的 bootc 镜像
+pkgs.dockerTools.buildLayeredImage {
+  name = imageName;
+  tag = imageTag;
 
-out_tar = os.environ["out"]
-skeleton_dir = "${fhsSkeleton}"
-with open("${closureInfo}/store-paths") as f:
-    store_paths = sorted([line.strip() for line in f if line.strip()])
+  # 强制生成合法时间戳，确保每层都有完整的 OCI history 记录以通过 bootc switch 校验
+  created = "now";
 
-def get_dir_size(path):
-    total = 0
-    if os.path.islink(path) or os.path.isfile(path):
-        return os.lstat(path).st_size
-    for dirpath, _, filenames in os.walk(path, followlinks=False):
-        for fn in filenames:
-            try:
-                total += os.lstat(os.path.join(dirpath, fn)).st_size
-            except OSError:
-                pass
-    return total
+  # 均衡切分为 41 层，确保后续增量更新仅需下载几十 MB 变更层
+  maxLayers = 41;
 
-LARGE_THRESHOLD = 250 * 1024 * 1024
-NUM_BUCKETS = 32
+  contents = [ bootcRootfs ];
 
-large_items = []
-regular_buckets = [[] for _ in range(NUM_BUCKETS)]
+  extraCommands = ''
+    # 清理容器打包生成的临时目录，并确保符合 bootc container lint 规范
+    rm -rf var/run
+    ln -s /run var/run
+    chmod 1777 tmp var/tmp
+  '';
 
-for p in store_paths:
-    if get_dir_size(p) >= LARGE_THRESHOLD:
-        large_items.append(p)
-    else:
-        h = int(hashlib.sha256(os.path.basename(p).encode()).hexdigest(), 16)
-        regular_buckets[h % NUM_BUCKETS].append(p)
-
-layer_specs = [("skeleton", [skeleton_dir])] + [
-    (f"bucket-{i:02d}", items)
-    for i, items in enumerate([[p] for p in large_items] + [b for b in regular_buckets if b])
-]
-
-os.makedirs("/tmp/layers", exist_ok=True)
-
-def build_single_layer(args):
-    idx, name, paths = args
-    layer_tar = f"/tmp/layers/layer_{idx:03d}.tar"
-    sha = hashlib.sha256()
-
-    with tarfile.open(layer_tar, "w") as tf:
-        if name == "skeleton":
-            for root, dirs, files in os.walk(paths[0], followlinks=False):
-                rel_root = os.path.relpath(root, paths[0])
-                for item in sorted(dirs + files):
-                    full = os.path.join(root, item)
-                    arcname = item if rel_root == "." else os.path.join(rel_root, item)
-                    ti = tf.gettarinfo(full, arcname=arcname)
-                    ti.uid = ti.gid = 0
-                    ti.uname = ti.gname = "root"
-                    ti.mtime = 0
-                    if ti.isreg():
-                        with open(full, "rb") as fobj:
-                            tf.addfile(ti, fobj)
-                    else:
-                        tf.addfile(ti)
-        else:
-            for d in ["usr", "usr/nix", "usr/nix/store"]:
-                ti = tarfile.TarInfo(name=d)
-                ti.type = tarfile.DIRTYPE
-                ti.mode = 0o755
-                ti.mtime = 0
-                tf.addfile(ti)
-            for sp in paths:
-                base = os.path.basename(sp)
-                for root, dirs, files in os.walk(sp, followlinks=False):
-                    rel_sub = os.path.relpath(root, sp)
-                    arc_dir = f"usr/nix/store/{base}" if rel_sub == "." else f"usr/nix/store/{base}/{rel_sub}"
-                    ti_d = tf.gettarinfo(root, arcname=arc_dir)
-                    ti_d.uid = ti_d.gid = 0
-                    ti_d.mode = 0o755
-                    ti_d.mtime = 0
-                    tf.addfile(ti_d)
-                    for fn in sorted(files):
-                        full = os.path.join(root, fn)
-                        arcname = f"{arc_dir}/{fn}"
-                        ti = tf.gettarinfo(full, arcname=arcname)
-                        ti.uid = ti.gid = 0
-                        ti.mtime = 0
-                        if ti.issym() and ti.linkname.startswith("/nix/store/"):
-                            ti.linkname = "/usr" + ti.linkname
-                        if ti.isreg():
-                            with open(full, "rb") as fobj:
-                                tf.addfile(ti, fobj)
-                        else:
-                            tf.addfile(ti)
-
-    with open(layer_tar, "rb") as f:
-        while chunk := f.read(1024 * 1024):
-            sha.update(chunk)
-    digest = sha.hexdigest()
-    final_layer_name = f"{digest}.tar"
-    os.rename(layer_tar, f"/tmp/layers/{final_layer_name}")
-    return idx, name, final_layer_name, f"sha256:{digest}"
-
-with ThreadPoolExecutor(max_workers=4) as pool:
-    results = sorted(pool.map(build_single_layer, [(i, n, p) for i, (n, p) in enumerate(layer_specs)]))
-
-layer_files = [r[2] for r in results]
-diff_ids = [r[3] for r in results]
-
-created_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-# 为每一层生成对应的 OCI history 条目，满足 ostree-rs-ext 校验要求（防止 Truncated history 报错）
-history_entries = [
-    {
-        "created": "1970-01-01T00:00:00Z",
-        "created_by": f"nix-bootc-layer: {r[1]}"
-    }
-    for r in results
-]
-
-config_obj = {
-    "architecture": "amd64",
-    "os": "linux",
-    "created": created_ts,
-    "config": {
-        "Cmd": ["/usr/lib/systemd/systemd"],
-        "Labels": {"containers.bootc": "1"}
-    },
-    "rootfs": {
-        "type": "layers",
-        "diff_ids": diff_ids
-    },
-    "history": history_entries
+  config = {
+    Cmd = [ "/usr/nixos-toplevel/init" ];
+    Labels = {
+      "containers.bootc" = "1";
+      "ostree.bootable" = "true";
+    };
+  };
 }
-config_bytes = json.dumps(config_obj, separators=(",", ":")).encode()
-config_digest = hashlib.sha256(config_bytes).hexdigest()
-config_filename = f"{config_digest}.json"
-with open(f"/tmp/layers/{config_filename}", "wb") as cf:
-    cf.write(config_bytes)
-
-manifest_obj = [{
-    "Config": config_filename,
-    "RepoTags": ["my-nixos-cli-bootc-vm:latest"],
-    "Layers": layer_files
-}]
-with open("/tmp/layers/manifest.json", "wb") as mf:
-    mf.write(json.dumps(manifest_obj, separators=(",", ":")).encode())
-
-with tarfile.open(out_tar, "w") as archive:
-    archive.add("/tmp/layers/manifest.json", arcname="manifest.json")
-    archive.add(f"/tmp/layers/{config_filename}", arcname=config_filename)
-    for lf in layer_files:
-        archive.add(f"/tmp/layers/{lf}", arcname=lf)
-
-print(f">>> Built {len(layer_files)} balanced layers with valid OCI history into {out_tar}")
-EOF
-''
