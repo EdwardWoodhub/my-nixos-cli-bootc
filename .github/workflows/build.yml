@@ -1,26 +1,24 @@
-name: Build Xfce OS With Nix
+name: Build NixOS Bootc VM
 
 on:
-  # 1. 每天北京时间 02:01 (UTC 18:01) 定时执行
   schedule:
     - cron: '01 18 * * *'
 
-  # 2. 仅当 main 分支有代码 push 时触发
   push:
     branches:
       - main
     paths-ignore:
       - "**.md"
 
-  # 3. 支持在 GitHub 网页上手动点击运行
   workflow_dispatch:
 
 permissions:
-  contents: write # 允许创建 GitHub Release 并上传 ISO 文件
-  packages: write # 允许向 GitHub Container Registry (GHCR) 推送镜像
+  contents: write
+  packages: write
 
 env:
   NIX_CHANNEL: nixos-26.05
+  IMAGE_NAME: my-nixos-cli-bootc-vm
 
 jobs:
   build-and-sync:
@@ -38,37 +36,41 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # 2. 构建多层 bootc FHS 系统镜像 tar 包
+      # 2. 构建多层 bootc FHS 系统镜像 tar 包（内置 bootc container lint 检查）
       - name: Build Layered Bootc Image
         run: |
           nix-build image.nix -o result
 
-      # 3. 加载镜像并执行 bootc container lint 规范体检
-      # 注意：普通容器运行不经过 initrd/systemd 挂载，需先在容器内临时将 /usr/nix/store 映射至 /nix/store 再执行 lint
-      - name: Load and Lint Bootc Image
+      # 3. 安装 Skopeo（用于直接流式推送镜像，彻底省去耗时的 docker load 解压）
+      - name: Install Skopeo
         run: |
-          docker load < result
-          echo ">>> 正在执行 bootc 镜像结构规范校验..."
-          docker run --rm --entrypoint /bin/sh my-nixos-xfce-vm:latest \
-            -c "ln -s /usr/nix/store/* /nix/store/ && /usr/bin/bootc container lint --rootfs=/"
+          sudo apt-get update && sudo apt-get install -y skopeo
 
-      # 4. 登录 GHCR
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # 5. 推送到 GHCR
+      # 4. 直接从 tar 归档流式推送到 GHCR
       - name: Push to GHCR
         run: |
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          GHCR_IMAGE="ghcr.io/${REPO_OWNER}/my-nixos-xfce-vm:latest"
+          GHCR_IMAGE="docker://ghcr.io/${REPO_OWNER}/${{ env.IMAGE_NAME }}:latest"
 
-          docker tag my-nixos-xfce-vm:latest "$GHCR_IMAGE"
-          echo ">>> 正在推送到 GHCR: $GHCR_IMAGE"
-          docker push "$GHCR_IMAGE"
+          echo ">>> 正在流式推送到 GHCR: $GHCR_IMAGE"
+          skopeo copy \
+            --dest-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "docker-archive:result" "$GHCR_IMAGE"
+
+      # 5. 使用 Skopeo 同步镜像到阿里云 ACR
+      - name: Sync Image to Aliyun ACR using Skopeo
+        run: |
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SRC_IMAGE="docker://ghcr.io/${REPO_OWNER}/${{ env.IMAGE_NAME }}:latest"
+          DEST_IMAGE="docker://${{ secrets.ALIYUN_ACR_REGISTRY }}/edwardwoodhub/${{ env.IMAGE_NAME }}:latest"
+
+          echo ">>> 正在使用 Skopeo 同步镜像到阿里云 ACR..."
+          skopeo copy \
+            --src-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --dest-creds="${{ secrets.ALIYUN_ACR_USERNAME }}:${{ secrets.ALIYUN_ACR_PASSWORD }}" \
+            "$SRC_IMAGE" "$DEST_IMAGE"
+
+          echo ">>> 同步完成！"
 
       # 6. 生成发布所用的 Tag 与时间戳
       - name: Generate Release Tag
@@ -85,12 +87,12 @@ jobs:
             -I nixos-config=./iso.nix \
             -o iso-result
 
-          cp iso-result/iso/*.iso my-nixos-xfce-vm.iso
+          cp iso-result/iso/*.iso ${{ env.IMAGE_NAME }}.iso
 
       # 8. 将大于 2GB 的 ISO 切割为多个 1.5GB 的文件
       - name: Split ISO
         run: |
-          split -b 1500M my-nixos-xfce-vm.iso my-nixos-xfce-vm.iso.part-
+          split -b 1500M ${{ env.IMAGE_NAME }}.iso ${{ env.IMAGE_NAME }}.iso.part-
 
       # 9. 发布切割后的 ISO 分卷到 GitHub Releases
       - name: Publish ISO to GitHub Releases
@@ -100,24 +102,7 @@ jobs:
           github.event_name == 'schedule' ||
           github.event_name == 'workflow_dispatch'
         with:
-          files: my-nixos-xfce-vm.iso.part-*
+          files: ${{ env.IMAGE_NAME }}.iso.part-*
           tag_name: ${{ steps.vars.outputs.tag }}
           name: "LiveISO Build ${{ steps.vars.outputs.tag }}"
           generate_release_notes: true
-
-      # 10. 使用 Skopeo 同步镜像到阿里云 ACR
-      - name: Sync Image from GHCR to Aliyun ACR using Skopeo
-        run: |
-          sudo apt-get update && sudo apt-get install -y skopeo
-
-          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          SRC_IMAGE="docker://ghcr.io/${REPO_OWNER}/my-nixos-xfce-vm:latest"
-          DEST_IMAGE="docker://${{ secrets.ALIYUN_ACR_REGISTRY }}/edwardwoodhub/my-nixos-xfce-vm:latest"
-
-          echo ">>> 正在使用 Skopeo 同步镜像到阿里云 ACR..."
-          skopeo copy \
-            --src-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-            --dest-creds="${{ secrets.ALIYUN_ACR_USERNAME }}:${{ secrets.ALIYUN_ACR_PASSWORD }}" \
-            "$SRC_IMAGE" "$DEST_IMAGE"
-
-          echo ">>> 同步完成！"
