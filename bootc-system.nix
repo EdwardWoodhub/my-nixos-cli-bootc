@@ -19,13 +19,27 @@
   # 3. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 4. Stage 1 (Initrd) 早期绑定挂载：确保 switch_root 切换根文件系统前 /nix/store 已就绪
-  boot.initrd.postMountCommands = ''
-    mkdir -p /mnt-root/nix/store
-    mount --bind /mnt-root/usr/nix/store /mnt-root/nix/store
-  '';
+  # 4. Stage 1 (Systemd Initrd) 早期绑定挂载：
+  # 在根文件系统 /sysroot 挂载完成后、执行 switch_root 之前，将 /sysroot/usr/nix/store 绑定到 /sysroot/nix/store
+  boot.initrd.systemd.services.bind-nix-store = {
+    description = "Bind mount /sysroot/usr/nix/store to /sysroot/nix/store in initrd";
+    wantedBy = [ "initrd.target" ];
+    after = [ "sysroot.mount" ];
+    before = [ "initrd-root-fs.target" "initrd-switch-root.target" ];
+    unitConfig = {
+      DefaultDependencies = false;
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = [
+        "/bin/mkdir -p /sysroot/nix/store"
+        "/bin/mount --bind -o ro /sysroot/usr/nix/store /sysroot/nix/store"
+      ];
+    };
+  };
 
-  # 5. Stage 2 (Systemd) 持久化只读绑定挂载：保证系统运行期间 /nix/store 严格只读且可用
+  # 5. Stage 2 (Systemd) 持久化只读绑定挂载：保证系统进入正常阶段后 /nix/store 持续可用
   systemd.mounts = [
     {
       what = "/usr/nix/store";
