@@ -40,7 +40,6 @@ let
 
     chmod -R u+w $out/usr/nix/store
 
-    # 同步重定向桶内指向 /nix/store/ 的符号链接，防止任何跨边界解析
     python3 - << 'EOF'
 import os
 root = os.path.join(os.environ["out"], "usr/nix/store")
@@ -57,7 +56,7 @@ EOF
 
   storeBuckets = map mkStoreBucket base32Chars;
 
-  # 构建 FHS 骨架、内核与 /usr/etc
+  # 构建 FHS 骨架、内核与 /usr/etc（仅约 150MB）
   fhsSkeleton = pkgs.runCommand "nixos-bootc-fhs-skeleton" {
     nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.python3 ];
   } ''
@@ -125,18 +124,20 @@ for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
 EOF
   '';
 
-  # 独立的前置质量门禁：使用硬链接（cp -al）在隔离环境中合并目录树，零拷贝且保持原始文件/链接结构
+  # 轻量级质量门禁：直接复制 150MB 骨架（避免跨设备硬链接报错且不复制 4.8GB store）执行 bootc lint
   lintCheck = pkgs.runCommand "nixos-bootc-lint-check" {
     nativeBuildInputs = [ pkgs.bootc pkgs.coreutils ];
   } ''
     mkdir -p rootfs
-    cp -al ${fhsSkeleton}/* rootfs/
+    cp -a ${fhsSkeleton}/* rootfs/
     chmod -R u+w rootfs
-    for bucket in ${toString storeBuckets}; do
-      cp -al "$bucket"/usr/nix/store/* rootfs/usr/nix/store/ 2>/dev/null || true
-    done
 
-    echo ">>> Running bootc container lint in isolated rootfs..."
+    # 创建 store 目录占位符供符号链接目标验证（无需拷贝 4.8GB 实体）
+    while IFS= read -r store_path; do
+      mkdir -p "rootfs/usr$store_path"
+    done < ${closureInfo}/store-paths
+
+    echo ">>> Running bootc container lint..."
     bootc container lint --rootfs=rootfs --skip baseimage-composefs
     touch $out
   '';
