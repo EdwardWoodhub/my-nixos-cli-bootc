@@ -18,7 +18,7 @@ let
     rootPaths = [ toplevel modulesTree ];
   };
 
-  # 1. 构建极轻量 FHS 骨架（仅 ~60MB）
+  # 1. 构建极轻量 FHS 骨架（仅 ~38MB）
   fhsSkeleton = pkgs.runCommand "nixos-bootc-fhs-skeleton" {
     nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.python3 pkgs.bootc ];
   } ''
@@ -75,7 +75,6 @@ for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
             os.symlink("/usr" + target, full_path)
 EOF
 
-    # 直接在临时拷贝上做 lint 校验
     mkdir -p /tmp/lint-rootfs
     cp -a $out/* /tmp/lint-rootfs/
     while IFS= read -r store_path; do
@@ -86,12 +85,11 @@ EOF
   '';
 
 in
-# 2. 单步多核并行直接生成标准 Docker/OCI Archive（零中间拷贝、零链式滚雪球、速度极快）
 pkgs.runCommand "my-nixos-cli-bootc-vm.tar" {
   nativeBuildInputs = [ pkgs.python3 pkgs.coreutils ];
 } ''
   python3 - << 'EOF'
-import os, json, hashlib, tarfile, time
+import os, json, hashlib, tarfile, datetime
 from concurrent.futures import ThreadPoolExecutor
 
 out_tar = os.environ["out"]
@@ -124,7 +122,6 @@ for p in store_paths:
         h = int(hashlib.sha256(os.path.basename(p).encode()).hexdigest(), 16)
         regular_buckets[h % NUM_BUCKETS].append(p)
 
-# Layer 0: FHS 骨架; Layer 1..N: 均衡数据包（所有层直接从 /nix/store 流式写入 tar，零磁盘中转拷贝）
 layer_specs = [("skeleton", [skeleton_dir])] + [
     (f"bucket-{i:02d}", items)
     for i, items in enumerate([[p] for p in large_items] + [b for b in regular_buckets if b])
@@ -154,7 +151,6 @@ def build_single_layer(args):
                     else:
                         tf.addfile(ti)
         else:
-            # 确保父目录存在
             for d in ["usr", "usr/nix", "usr/nix/store"]:
                 ti = tarfile.TarInfo(name=d)
                 ti.type = tarfile.DIRTYPE
@@ -191,22 +187,38 @@ def build_single_layer(args):
     digest = sha.hexdigest()
     final_layer_name = f"{digest}.tar"
     os.rename(layer_tar, f"/tmp/layers/{final_layer_name}")
-    return idx, final_layer_name, f"sha256:{digest}"
+    return idx, name, final_layer_name, f"sha256:{digest}"
 
 with ThreadPoolExecutor(max_workers=4) as pool:
     results = sorted(pool.map(build_single_layer, [(i, n, p) for i, (n, p) in enumerate(layer_specs)]))
 
-layer_files = [r[1] for r in results]
-diff_ids = [r[2] for r in results]
+layer_files = [r[2] for r in results]
+diff_ids = [r[3] for r in results]
+
+created_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# 为每一层生成对应的 OCI history 条目，满足 ostree-rs-ext 校验要求（防止 Truncated history 报错）
+history_entries = [
+    {
+        "created": "1970-01-01T00:00:00Z",
+        "created_by": f"nix-bootc-layer: {r[1]}"
+    }
+    for r in results
+]
 
 config_obj = {
     "architecture": "amd64",
     "os": "linux",
+    "created": created_ts,
     "config": {
         "Cmd": ["/usr/lib/systemd/systemd"],
         "Labels": {"containers.bootc": "1"}
     },
-    "rootfs": {"type": "layers", "diff_ids": diff_ids}
+    "rootfs": {
+        "type": "layers",
+        "diff_ids": diff_ids
+    },
+    "history": history_entries
 }
 config_bytes = json.dumps(config_obj, separators=(",", ":")).encode()
 config_digest = hashlib.sha256(config_bytes).hexdigest()
@@ -222,13 +234,12 @@ manifest_obj = [{
 with open("/tmp/layers/manifest.json", "wb") as mf:
     mf.write(json.dumps(manifest_obj, separators=(",", ":")).encode())
 
-# 封装为标准 docker-archive 供 skopeo copy 直接流式推送
 with tarfile.open(out_tar, "w") as archive:
     archive.add("/tmp/layers/manifest.json", arcname="manifest.json")
     archive.add(f"/tmp/layers/{config_filename}", arcname=config_filename)
     for lf in layer_files:
         archive.add(f"/tmp/layers/{lf}", arcname=lf)
 
-print(f">>> Built {len(layer_files)} balanced layers directly into {out_tar}")
+print(f">>> Built {len(layer_files)} balanced layers with valid OCI history into {out_tar}")
 EOF
 ''
