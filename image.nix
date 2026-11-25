@@ -18,8 +18,7 @@ let
     rootPaths = [ toplevel modulesTree ];
   };
 
-  # 将 32 个 Nix Base32 字符分成 32 个独立的 OCI 层桶，每个桶约 100~200MB
-  # 修改单个软件时，仅会触发对应哈希首字符那 1 个桶的重新下载
+  # 将 32 个 Nix Base32 字符分成 32 个独立的 OCI 层桶，彻底解决单层 4.8GB 膨胀问题
   base32Chars = [
     "0" "1" "2" "3" "4" "5" "6" "7" "8" "9"
     "a" "b" "c" "d" "f" "g" "h" "i" "j" "k"
@@ -27,7 +26,7 @@ let
   ];
 
   mkStoreBucket = prefix: pkgs.runCommand "nix-store-bucket-${prefix}" {
-    nativeBuildInputs = [ pkgs.coreutils ];
+    nativeBuildInputs = [ pkgs.coreutils pkgs.python3 ];
   } ''
     mkdir -p $out/usr/nix/store
     while IFS= read -r store_path; do
@@ -38,11 +37,27 @@ let
           ;;
       esac
     done < ${closureInfo}/store-paths
+
+    chmod -R u+w $out/usr/nix/store
+
+    # 同步重定向桶内指向 /nix/store/ 的符号链接，防止任何跨边界解析
+    python3 - << 'EOF'
+import os
+root = os.path.join(os.environ["out"], "usr/nix/store")
+for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    for name in filenames + dirnames:
+        fp = os.path.join(dirpath, name)
+        if os.path.islink(fp):
+            target = os.readlink(fp)
+            if target.startswith("/nix/store/"):
+                os.unlink(fp)
+                os.symlink("/usr" + target, fp)
+EOF
   '';
 
   storeBuckets = map mkStoreBucket base32Chars;
 
-  # 构建 FHS 骨架、内核与 /usr/etc（不包含庞大的 store 实体，体积仅约 150MB）
+  # 构建 FHS 骨架、内核与 /usr/etc
   fhsSkeleton = pkgs.runCommand "nixos-bootc-fhs-skeleton" {
     nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.python3 ];
   } ''
@@ -75,7 +90,7 @@ let
     rsync -a ${toplevel}/etc/ $out/usr/etc/
     cp -L ${toplevel}/etc/os-release $out/usr/lib/os-release
 
-    # 6. 按照 bootc 规范放置内核、initramfs 与聚合后的内核模块
+    # 6. 按照 bootc 规范放置内核、initramfs 与聚合后的内核模块（使用 -L 解引用为实体文件）
     mkdir -p $out/usr/lib/modules/${kver}
     cp -L ${kernel}/bzImage $out/usr/lib/modules/${kver}/vmlinuz
     cp -L ${initrd} $out/usr/lib/modules/${kver}/initramfs.img
@@ -110,11 +125,21 @@ for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
 EOF
   '';
 
-  # 合并检查的完整视图（仅用于构建期执行 bootc container lint，不打入最终单层）
-  lintView = pkgs.symlinkJoin {
-    name = "nixos-bootc-lint-view";
-    paths = [ fhsSkeleton ] ++ storeBuckets;
-  };
+  # 独立的前置质量门禁：在干净的隔离环境中合并目录树并执行 bootc container lint
+  lintCheck = pkgs.runCommand "nixos-bootc-lint-check" {
+    nativeBuildInputs = [ pkgs.bootc pkgs.coreutils ];
+  } ''
+    mkdir -p rootfs
+    cp -as ${fhsSkeleton}/* rootfs/
+    chmod -R u+w rootfs
+    for bucket in ${toString storeBuckets}; do
+      cp -as "$bucket"/usr/nix/store/* rootfs/usr/nix/store/ 2>/dev/null || true
+    done
+
+    echo ">>> Running bootc container lint in isolated rootfs..."
+    bootc container lint --rootfs=rootfs --skip baseimage-composefs
+    touch $out
+  '';
 
 in
 pkgs.dockerTools.buildLayeredImage {
@@ -123,12 +148,11 @@ pkgs.dockerTools.buildLayeredImage {
 
   maxLayers = 100;
 
-  # 将 32 个独立的 store 桶 + FHS 骨架作为独立派生传入，实现真正均衡的层级切分
   contents = storeBuckets ++ [ fhsSkeleton ];
 
-  # 在镜像封装阶段直接对合并后的根目录执行 bootc lint 检查，并确保顶层 /nix/store 为空
+  # 引用 lintCheck 确保镜像打包前必须通过规范校验，同时清理顶层多余的 /nix/store 副本
   extraCommands = ''
-    ${pkgs.bootc}/bin/bootc container lint --rootfs=. --skip baseimage-composefs
+    test -e ${lintCheck}
     rm -rf nix/store/*
     mkdir -p nix/store
   '';
