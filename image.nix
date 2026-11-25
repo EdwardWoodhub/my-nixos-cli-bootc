@@ -152,22 +152,22 @@ let
     mkdir -p $out/usr/lib/bootupd/updates/grub2/i386-pc
     mkdir -p $out/usr/lib/bootupd/updates/grub2/x86_64-efi
 
-    # 1) 生成 UEFI 独立引导镜像 BOOTX64.EFI（内嵌分区、文件系统与搜索模块）
+    # 1) 生成 UEFI 独立引导镜像 BOOTX64.EFI（使用 search_label 模块文件）
     ${pkgs.grub2_efi}/bin/grub-mkimage \
       --format=x86_64-efi \
       --directory=${pkgs.grub2_efi}/lib/grub/x86_64-efi \
       --output=$out/usr/lib/bootupd/updates/EFI/BOOT/BOOTX64.EFI \
       --prefix='(hd0,gpt3)/boot/grub' \
-      part_gpt part_msdos fat ext2 normal boot linux search search_fs_uuid search_fs_label configfile echo test ls
+      part_gpt part_msdos fat ext2 normal boot linux search search_fs_uuid search_label configfile echo test ls
 
-    # 2) 生成 Legacy BIOS 核心镜像 boot.img 与 core.img
+    # 2) 生成 Legacy BIOS 核心镜像 boot.img 与 core.img（使用 search_label 模块文件）
     cp ${pkgs.grub2}/lib/grub/i386-pc/boot.img $out/usr/lib/bootupd/updates/grub2/i386-pc/
     ${pkgs.grub2}/bin/grub-mkimage \
       --format=i386-pc \
       --directory=${pkgs.grub2}/lib/grub/i386-pc \
       --output=$out/usr/lib/bootupd/updates/grub2/i386-pc/core.img \
       --prefix='(,gpt3)/boot/grub' \
-      biosdisk part_gpt part_msdos ext2 normal boot linux search search_fs_uuid search_fs_label configfile echo test ls
+      biosdisk part_gpt part_msdos ext2 normal boot linux search search_fs_uuid search_label configfile echo test ls
 
     # 复制运行时模块供 grub 后期按需动态加载
     cp -r ${pkgs.grub2}/lib/grub/i386-pc/*.mod $out/usr/lib/bootupd/updates/grub2/i386-pc/
