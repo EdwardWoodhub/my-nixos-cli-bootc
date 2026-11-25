@@ -21,12 +21,12 @@ let
 
   # 构建符合 bootc 强制规范的 UsrMerge FHS 骨架与系统布局
   bootcLayout = pkgs.runCommand "nixos-bootc-fhs-layout" {
-    nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.bootc ];
+    nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.bootc pkgs.python3 ];
   } ''
     mkdir -p $out/usr/{bin,sbin,lib,lib64,share,etc,nix/store}
     mkdir -p $out/nix/store $out/var $out/run $out/tmp $out/proc $out/sys $out/dev $out/boot
 
-    # 1. 创建标准的 UsrMerge 顶层符号链接（bootc container lint 强制校验）
+    # 1. 创建标准的 UsrMerge 顶层符号链接（相对路径，绝不逃逸）
     ln -s usr/bin $out/bin
     ln -s usr/sbin $out/sbin
     ln -s usr/lib $out/lib
@@ -64,7 +64,32 @@ let
       cp -a "$store_path" "$out/usr/nix/store/"
     done < ${closureInfo}/store-paths
 
-    # 8. 构建期直接执行 bootc 结构体检（无需启动容器，耗时约 2 秒）
+    # 8. 关键修复：重写符号链接，防止 bootc/composefs 校验时出现路径逃逸或悬空
+    python3 - << 'EOF'
+import os
+
+out_dir = os.environ["out"]
+
+for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
+    for name in filenames + dirnames:
+        full_path = os.path.join(dirpath, name)
+        if not os.path.islink(full_path):
+            continue
+        target = os.readlink(full_path)
+
+        # 将指向 /nix/store/... 的绝对链接统一重定向到镜像内真实存在的 /usr/nix/store/...
+        if target.startswith("/nix/store/"):
+            new_target = "/usr" + target
+            os.unlink(full_path)
+            os.symlink(new_target, full_path)
+        # 修复 /usr/etc 下指向 /etc/static/... 的链接，使其指向 /usr/etc/static/...
+        elif target.startswith("/etc/static/"):
+            new_target = "/usr" + target
+            os.unlink(full_path)
+            os.symlink(new_target, full_path)
+EOF
+
+    # 9. 构建期直接执行 bootc 结构体检
     echo ">>> Running bootc container lint..."
     bootc container lint --rootfs=$out
   '';
@@ -78,7 +103,7 @@ pkgs.dockerTools.buildLayeredImage {
 
   contents = [ bootcLayout ];
 
-  # 清理 buildLayeredImage 自动带入的顶层 /nix/store 副本，只保留空挂载点，避免镜像体积翻倍
+  # 清理 buildLayeredImage 自动带入的顶层 /nix/store 副本，只保留空挂载点
   extraCommands = ''
     rm -rf nix/store/*
     mkdir -p nix/store
