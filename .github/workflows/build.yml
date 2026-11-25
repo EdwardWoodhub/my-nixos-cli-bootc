@@ -44,11 +44,13 @@ jobs:
           nix-build image.nix -o result
 
       # 3. 加载镜像并执行 bootc container lint 规范体检
+      # 注意：普通容器运行不经过 initrd/systemd 挂载，需先在容器内临时将 /usr/nix/store 映射至 /nix/store 再执行 lint
       - name: Load and Lint Bootc Image
         run: |
           docker load < result
           echo ">>> 正在执行 bootc 镜像结构规范校验..."
-          docker run --rm my-nixos-xfce-vm:latest bootc container lint --rootfs=/
+          docker run --rm --entrypoint /bin/sh my-nixos-xfce-vm:latest \
+            -c "ln -s /usr/nix/store/* /nix/store/ && /usr/bin/bootc container lint --rootfs=/"
 
       # 4. 登录 GHCR
       - name: Log in to GHCR
