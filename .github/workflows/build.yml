@@ -1,23 +1,27 @@
-name: Build Pure-FHS openSUSE bootc Image With Nix
+name: Build Xfce OS With Nix
 
 on:
-  # 1. 每天北京时间 02:01 (UTC 18:01) 定时执行（自动检查上游 RPM 更新并重锁哈希）
+  # 1. 每天北京时间 02:01 (UTC 18:01) 定时执行
   schedule:
     - cron: '01 18 * * *'
 
-  # 2. 当 main 分支有非文档变更时触发
+  # 2. 仅当 main 分支有代码 push 时触发
   push:
     branches:
       - main
     paths-ignore:
       - "**.md"
+    
 
   # 3. 支持在 GitHub 网页上手动点击运行
   workflow_dispatch:
 
 permissions:
-  contents: write # 允许自动提交更新后的 rpms.lock.json
-  packages: write # 允许向 GHCR 推送镜像
+  contents: write # 允许创建 GitHub Release 并上传 ISO 文件
+  packages: write # 允许向 GitHub Container Registry (GHCR) 推送镜像
+
+env:
+  NIX_CHANNEL: nixos-26.05
 
 jobs:
   build-and-sync:
@@ -26,47 +30,21 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 1. 安装 Nix 工具链并开启 Flakes
+      # 1. 安装 Nix 工具链并显式绑定 nixpkgs 路径
       - name: Install Nix
         uses: cachix/install-nix-action@v27
         with:
+          nix_path: nixpkgs=channel:${{ env.NIX_CHANNEL }}
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # 2. 启用 GitHub Actions 原生 Nix Store 缓存（未变动的 RPM 解包层秒级复用）
-      - name: Setup Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
-      # 3. 自动解析依赖并更新 rpms.lock.json（包含锁文件缺失或损坏自愈检测）
-      - name: Lock openSUSE RPMs & Base Image SHA256
+      # 2. 构建多层系统镜像 tar 包
+      - name: Build Layered Docker Image
         run: |
-          if [ ! -f rpms.lock.json ] || grep -q '"null"' rpms.lock.json || [ "${{ github.event_name }}" == "schedule" ] || git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q "packages.nix"; then
-            echo ">>> 检测到依赖变更、锁文件无效或定时更新，正在自动生成 rpms.lock.json..."
-            nix run .#lock
-          else
-            echo ">>> packages.nix 未变更且锁文件有效，直接复用现有 rpms.lock.json"
-          fi
+          nix-build image.nix -o result
 
-      # 4. 若 rpms.lock.json 有变动，自动 commit 回仓库（带 [skip ci] 防止死循环）
-      - name: Commit Updated Lockfile
-        run: |
-          if [[ -n $(git status -s rpms.lock.json) ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add rpms.lock.json
-            git commit -m "chore(lock): update rpms.lock.json [skip ci]"
-            git push
-          fi
-
-      # 5. 使用 Flake 构建纯 FHS bootc 多层镜像
-      - name: Build Layered FHS bootc Image
-        run: |
-          nix build .#default -o result
-
-      # 6. 登录 GHCR
+      # 3. 登录 GHCR
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -74,86 +52,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 7. 刷新动态库与 SUID、初始化用户、生成 modules.dep 与 initramfs、校验 bootc 规范并推送到 GHCR
-      - name: Finalize System, Lint & Push to GHCR
+      # 4. 加载并推送到 GHCR
+      - name: Push to GHCR
         run: |
           docker load < result
 
-          # 在完整合并的根文件系统中执行收尾与 bootc 合规性检查
-          docker run --name bootc-finalize my-opensuse-fhs-bootc:latest /bin/bash -c '
-            set -e
-            # 0. 将 buildLayeredImage 生成的指向 /nix/store 的软链接就地解引用为实体文件，并清理 /nix
-            find / -xdev -type l | while read -r link; do
-              target=$(readlink "$link")
-              if [[ "$target" == /nix/store* ]]; then
-                if [ -e "$link" ]; then
-                  tmp_copy="${link}.nixderef"
-                  cp -aL "$link" "$tmp_copy"
-                  rm -f "$link"
-                  mv "$tmp_copy" "$link"
-                else
-                  rm -f "$link"
-                fi
-              fi
-            done
-            rm -rf /nix
-
-            # 1. 刷新动态链接库缓存并还原被 Nix Store 剥离的 SUID 特殊权限位
-            ldconfig
-            chmod 4755 /usr/bin/sudo || true
-            chmod 4750 /usr/libexec/dbus-1/dbus-daemon-launch-helper || true
-
-            # 2. 创建用户并注入加盐哈希密码（家目录落在 /var/home 下）
-            groupadd -f wheel
-            useradd -m -d /var/home/liveuser -G wheel -s /bin/bash liveuser || true
-            usermod -p '\''$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.'\'' liveuser
-            useradd -m -d /var/home/peter -G wheel -s /bin/bash peter || true
-            usermod -p '\''$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.'\'' peter
-            usermod -p '\''$6$3HzcniSmLcqcdDAD$XaGco3Esx69ux6SgsKCac/TWld3/L8ADC1I7eZRtaMvsPfNeb0cb6doyXP2qeyw6DOjVK.BluxZfQcAD/qR6e.'\'' root
-            mkdir -p /var/home/peter/winShare && chown -R peter:peter /var/home/peter
-
-            # 3. 合并 os-release 元数据
-            if [ -f /usr/lib/os-release.append ]; then
-              cat /usr/lib/os-release.append >> /usr/lib/os-release
-              rm -f /usr/lib/os-release.append
-            fi
-
-            # 4. 生成 modules.dep 并满足 bootc 内核路径规范 (/usr/lib/modules/<kver>/vmlinuz 与 initramfs.img)
-            KVER=$(ls -1 /usr/lib/modules | head -n 1)
-            [ -f "/boot/vmlinuz-$KVER" ] && mv "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"
-            rm -f "/usr/lib/modules/$KVER/build" "/usr/lib/modules/$KVER/source"
-            depmod -a "$KVER"
-            dracut --force --no-hostonly --no-hostonly-cmdline --kver "$KVER" "/usr/lib/modules/$KVER/initramfs.img"
-            rm -rf /boot/* /var/cache/* /tmp/*
-
-            # 5. 清理 openSUSE RPM 包带入的非法 /usr/etc 目录，合并至标准 /etc
-            if [ -d /usr/etc ]; then
-              cp -rn /usr/etc/. /etc/
-              rm -rf /usr/etc
-            fi
-
-            # 6. 执行 bootc 官方镜像规范校验
-            bootc container lint
-          '
-
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          GHCR_IMAGE="ghcr.io/${REPO_OWNER}/my-opensuse-fhs-bootc:latest"
+          GHCR_IMAGE="ghcr.io/${REPO_OWNER}/my-nixos-xfce-vm:latest"
 
-          # 提交轻量顶层变更，保留底层全部 Nix 100 层切片缓存
-          docker commit bootc-finalize "$GHCR_IMAGE"
-          docker rm bootc-finalize
-
-          echo ">>> 正在增量推送到 GHCR: $GHCR_IMAGE"
+          docker tag my-nixos-xfce-vm:latest "$GHCR_IMAGE"
+          echo ">>> 正在推送到 GHCR: $GHCR_IMAGE"
           docker push "$GHCR_IMAGE"
 
-      # 8. 使用 Skopeo 同步镜像到阿里云 ACR
+      # --- 以下为追加到 steps 末尾的代码 ---
+
+      # 6. 生成发布所用的 Tag 与时间戳
+      - name: Generate Release Tag
+        id: vars
+        run: |
+          TAG_NAME="liveiso-$(date +'%Y%m%d%H%M')"
+          echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+      # 7. 构建 NixOS LiveCD ISO
+      - name: Build NixOS LiveCD ISO
+        run: |
+          # 基于 iso.nix 构建 livecd iso
+          nix-build '<nixpkgs/nixos>' \
+            -A config.system.build.isoImage \
+            -I nixos-config=./iso.nix \
+            -o iso-result
+
+          # 找到构建产物目录中的 .iso 文件并规范命名
+          cp iso-result/iso/*.iso my-nixos-xfce-vm.iso
+          
+      
+
+      # 8. 将大于 2GB 的 ISO 切割为多个 1.5GB 的文件
+      - name: Split ISO
+        run: |
+          split -b 1500M my-nixos-xfce-vm.iso my-nixos-xfce-vm.iso.part-
+
+      # 9. 发布切割后的 ISO 分卷到 GitHub Releases
+      - name: Publish ISO to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: |
+          github.event_name == 'push' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch'
+        with:
+          files: my-nixos-xfce-vm.iso.part-*
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: "LiveISO Build ${{ steps.vars.outputs.tag }}"
+          generate_release_notes: true
+      
+      # 5. 安装 Skopeo 并同步到阿里云 ACR
       - name: Sync Image from GHCR to Aliyun ACR using Skopeo
         run: |
           sudo apt-get update && sudo apt-get install -y skopeo
 
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          SRC_IMAGE="docker://ghcr.io/${REPO_OWNER}/my-opensuse-fhs-bootc:latest"
-          DEST_IMAGE="docker://${{ secrets.ALIYUN_ACR_REGISTRY }}/edwardwoodhub/my-opensuse-fhs-bootc:latest"
+          SRC_IMAGE="docker://ghcr.io/${REPO_OWNER}/my-nixos-xfce-vm:latest"
+          DEST_IMAGE="docker://${{ secrets.ALIYUN_ACR_REGISTRY }}/edwardwoodhub/my-nixos-xfce-vm:latest"
+          
 
           echo ">>> 正在使用 Skopeo 同步镜像到阿里云 ACR..."
           skopeo copy \
