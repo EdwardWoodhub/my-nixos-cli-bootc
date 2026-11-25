@@ -26,13 +26,13 @@ let
     mkdir -p $out/usr/{bin,sbin,lib,lib64,share,etc,nix/store}
     mkdir -p $out/nix/store $out/var $out/run $out/tmp $out/proc $out/sys $out/dev $out/boot
 
-    # 1. 创建标准的 UsrMerge 顶层符号链接（相对路径，绝不逃逸）
+    # 1. 创建标准的 UsrMerge 顶层符号链接
     ln -s usr/bin $out/bin
     ln -s usr/sbin $out/sbin
     ln -s usr/lib $out/lib
     ln -s usr/lib64 $out/lib64
 
-    # 2. 暴露标准的 FHS 接口（将聚合后的软件树链接到 /usr 下）
+    # 2. 暴露标准的 FHS 接口
     for dir in bin sbin lib share; do
       if [ -d "${toplevel}/sw/$dir" ]; then
         cp -rsf ${toplevel}/sw/$dir/* $out/usr/$dir/ 2>/dev/null || true
@@ -64,7 +64,10 @@ let
       cp -a "$store_path" "$out/usr/nix/store/"
     done < ${closureInfo}/store-paths
 
-    # 8. 关键修复：重写符号链接，防止 bootc/composefs 校验时出现路径逃逸或悬空
+    # 赋予构建者写权限，以便后续脚本修改符号链接（Nix 构建结束时会自动将 $out 恢复为只读）
+    chmod -R u+w $out/usr
+
+    # 8. 重写符号链接，防止 bootc/composefs 校验时出现路径逃逸或悬空
     python3 - << 'EOF'
 import os
 
@@ -77,12 +80,12 @@ for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
             continue
         target = os.readlink(full_path)
 
-        # 将指向 /nix/store/... 的绝对链接统一重定向到镜像内真实存在的 /usr/nix/store/...
+        # 将指向 /nix/store/... 的绝对链接统一重定向到 /usr/nix/store/...
         if target.startswith("/nix/store/"):
             new_target = "/usr" + target
             os.unlink(full_path)
             os.symlink(new_target, full_path)
-        # 修复 /usr/etc 下指向 /etc/static/... 的链接，使其指向 /usr/etc/static/...
+        # 修复 /usr/etc 下指向 /etc/static/... 的链接
         elif target.startswith("/etc/static/"):
             new_target = "/usr" + target
             os.unlink(full_path)
@@ -103,7 +106,6 @@ pkgs.dockerTools.buildLayeredImage {
 
   contents = [ bootcLayout ];
 
-  # 清理 buildLayeredImage 自动带入的顶层 /nix/store 副本，只保留空挂载点
   extraCommands = ''
     rm -rf nix/store/*
     mkdir -p nix/store
