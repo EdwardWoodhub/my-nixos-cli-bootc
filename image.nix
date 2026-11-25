@@ -90,7 +90,7 @@ EOF
     rsync -a ${toplevel}/etc/ $out/usr/etc/
     cp -L ${toplevel}/etc/os-release $out/usr/lib/os-release
 
-    # 6. 按照 bootc 规范放置内核、initramfs 与聚合后的内核模块（使用 -L 解引用为实体文件）
+    # 6. 按照 bootc 规范放置内核、initramfs 与聚合后的内核模块
     mkdir -p $out/usr/lib/modules/${kver}
     cp -L ${kernel}/bzImage $out/usr/lib/modules/${kver}/vmlinuz
     cp -L ${initrd} $out/usr/lib/modules/${kver}/initramfs.img
@@ -125,15 +125,15 @@ for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
 EOF
   '';
 
-  # 独立的前置质量门禁：在干净的隔离环境中合并目录树并执行 bootc container lint
+  # 独立的前置质量门禁：使用硬链接（cp -al）在隔离环境中合并目录树，零拷贝且保持原始文件/链接结构
   lintCheck = pkgs.runCommand "nixos-bootc-lint-check" {
     nativeBuildInputs = [ pkgs.bootc pkgs.coreutils ];
   } ''
     mkdir -p rootfs
-    cp -as ${fhsSkeleton}/* rootfs/
+    cp -al ${fhsSkeleton}/* rootfs/
     chmod -R u+w rootfs
     for bucket in ${toString storeBuckets}; do
-      cp -as "$bucket"/usr/nix/store/* rootfs/usr/nix/store/ 2>/dev/null || true
+      cp -al "$bucket"/usr/nix/store/* rootfs/usr/nix/store/ 2>/dev/null || true
     done
 
     echo ">>> Running bootc container lint in isolated rootfs..."
@@ -150,7 +150,6 @@ pkgs.dockerTools.buildLayeredImage {
 
   contents = storeBuckets ++ [ fhsSkeleton ];
 
-  # 引用 lintCheck 确保镜像打包前必须通过规范校验，同时清理顶层多余的 /nix/store 副本
   extraCommands = ''
     test -e ${lintCheck}
     rm -rf nix/store/*
