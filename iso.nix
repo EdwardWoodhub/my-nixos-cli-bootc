@@ -13,6 +13,9 @@
   isoImage.isoBaseName = lib.mkForce "my-nixos-cli-bootc-vm";
   isoImage.volumeID = lib.mkForce "NIXOS_BOOTC";
 
+  # 新增：开启串口输出，确保 CI 无头 QEMU 冒烟测试能实时捕获系统启动与登录日志
+  boot.kernelParams = [ "console=tty0" "console=ttyS0,115200n8" ];
+
   security.sudo.wheelNeedsPassword = false;
 
   services.displayManager.autoLogin = {
