@@ -22,7 +22,8 @@ let
     nativeBuildInputs = [ pkgs.rsync pkgs.coreutils pkgs.bootc pkgs.python3 ];
   } ''
     mkdir -p $out/usr/{bin,sbin,lib,lib64,share,etc,nix/store}
-    mkdir -p $out/nix/store $out/var $out/run $out/tmp $out/proc $out/sys $out/dev $out/boot
+    # 补齐 bootc/ostree 强制要求的顶层挂载点 /sysroot（以及 /ostree）
+    mkdir -p $out/nix/store $out/var $out/run $out/tmp $out/proc $out/sys $out/dev $out/boot $out/sysroot $out/ostree
 
     # 1. 创建标准的 UsrMerge 顶层符号链接
     ln -s usr/bin $out/bin
@@ -88,7 +89,7 @@ for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
             os.symlink("/usr" + target, full_path)
 EOF
 
-    # 9. 构建期执行 bootc 核心结构规范体检（跳过沙盒内受限的 composefs 检查）
+    # 9. 构建期执行 bootc 核心结构规范体检
     echo ">>> Running bootc container lint..."
     bootc container lint --rootfs=$out --skip baseimage-composefs
   '';
