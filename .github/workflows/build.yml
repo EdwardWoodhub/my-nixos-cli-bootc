@@ -11,7 +11,6 @@ on:
       - main
     paths-ignore:
       - "**.md"
-    
 
   # 3. 支持在 GitHub 网页上手动点击运行
   workflow_dispatch:
@@ -39,12 +38,19 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # 2. 构建多层系统镜像 tar 包
-      - name: Build Layered Docker Image
+      # 2. 构建多层 bootc FHS 系统镜像 tar 包
+      - name: Build Layered Bootc Image
         run: |
           nix-build image.nix -o result
 
-      # 3. 登录 GHCR
+      # 3. 加载镜像并执行 bootc container lint 规范体检
+      - name: Load and Lint Bootc Image
+        run: |
+          docker load < result
+          echo ">>> 正在执行 bootc 镜像结构规范校验..."
+          docker run --rm my-nixos-xfce-vm:latest bootc container lint --rootfs=/
+
+      # 4. 登录 GHCR
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -52,19 +58,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4. 加载并推送到 GHCR
+      # 5. 推送到 GHCR
       - name: Push to GHCR
         run: |
-          docker load < result
-
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           GHCR_IMAGE="ghcr.io/${REPO_OWNER}/my-nixos-xfce-vm:latest"
 
           docker tag my-nixos-xfce-vm:latest "$GHCR_IMAGE"
           echo ">>> 正在推送到 GHCR: $GHCR_IMAGE"
           docker push "$GHCR_IMAGE"
-
-      # --- 以下为追加到 steps 末尾的代码 ---
 
       # 6. 生成发布所用的 Tag 与时间戳
       - name: Generate Release Tag
@@ -73,19 +75,15 @@ jobs:
           TAG_NAME="liveiso-$(date +'%Y%m%d%H%M')"
           echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
 
-      # 7. 构建 NixOS LiveCD ISO
+      # 7. 构建 NixOS LiveCD ISO（已预装 bootc 和 podman）
       - name: Build NixOS LiveCD ISO
         run: |
-          # 基于 iso.nix 构建 livecd iso
           nix-build '<nixpkgs/nixos>' \
             -A config.system.build.isoImage \
             -I nixos-config=./iso.nix \
             -o iso-result
 
-          # 找到构建产物目录中的 .iso 文件并规范命名
           cp iso-result/iso/*.iso my-nixos-xfce-vm.iso
-          
-      
 
       # 8. 将大于 2GB 的 ISO 切割为多个 1.5GB 的文件
       - name: Split ISO
@@ -104,8 +102,8 @@ jobs:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: "LiveISO Build ${{ steps.vars.outputs.tag }}"
           generate_release_notes: true
-      
-      # 5. 安装 Skopeo 并同步到阿里云 ACR
+
+      # 10. 使用 Skopeo 同步镜像到阿里云 ACR
       - name: Sync Image from GHCR to Aliyun ACR using Skopeo
         run: |
           sudo apt-get update && sudo apt-get install -y skopeo
@@ -113,7 +111,6 @@ jobs:
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           SRC_IMAGE="docker://ghcr.io/${REPO_OWNER}/my-nixos-xfce-vm:latest"
           DEST_IMAGE="docker://${{ secrets.ALIYUN_ACR_REGISTRY }}/edwardwoodhub/my-nixos-xfce-vm:latest"
-          
 
           echo ">>> 正在使用 Skopeo 同步镜像到阿里云 ACR..."
           skopeo copy \
