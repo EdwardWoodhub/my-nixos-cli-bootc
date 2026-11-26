@@ -29,9 +29,10 @@ let
         readonly = true
       '';
 
-      # 包含 BIOS 与 UEFI 双架构 GRUB 工具链及 bootc/ostree
+      # 补充 bootupd（提供 bootupctl），确保 bootc install 与 bootupctl 可用
       environment.systemPackages = with pkgs; [
         bootc
+        bootupd
         ostree
         grub2
         grub2_efi
@@ -100,7 +101,7 @@ let
 
   # 2. 单独预构建内核与双模 bootupd 载荷（纯实体文件）
   bootcPayload = pkgs.runCommand "nixos-bootc-payload" {
-    nativeBuildInputs = with pkgs; [ grub2 grub2_efi coreutils ];
+    nativeBuildInputs = with pkgs; [ grub2 grub2_efi bootupd coreutils ];
   } ''
     mkdir -p $out/usr/lib/ostree
     mkdir -p $out/usr/lib/modules/${kver}
@@ -122,12 +123,12 @@ let
     readonly = true
     EOF
 
-    # UEFI BOOTX64.EFI
+    # UEFI BOOTX64.EFI（移除写死的 gpt3 分区号，改由内嵌 grub.cfg 动态搜索）
     ${pkgs.grub2_efi}/bin/grub-mkimage \
       --format=x86_64-efi \
       --directory=${pkgs.grub2_efi}/lib/grub/x86_64-efi \
       --output=$out/usr/lib/bootupd/updates/EFI/BOOT/BOOTX64.EFI \
-      --prefix='(hd0,gpt3)/boot/grub' \
+      --prefix='/boot/grub' \
       part_gpt part_msdos fat ext2 normal boot linux search search_fs_uuid search_label configfile echo test ls
 
     # Legacy BIOS boot.img 与 core.img
@@ -136,7 +137,7 @@ let
       --format=i386-pc \
       --directory=${pkgs.grub2}/lib/grub/i386-pc \
       --output=$out/usr/lib/bootupd/updates/grub2/i386-pc/core.img \
-      --prefix='(,gpt3)/boot/grub' \
+      --prefix='/boot/grub' \
       biosdisk part_gpt part_msdos ext2 normal boot linux search search_fs_uuid search_label configfile echo test ls
 
     cp -r ${pkgs.grub2}/lib/grub/i386-pc/*.mod $out/usr/lib/bootupd/updates/grub2/i386-pc/
@@ -154,6 +155,9 @@ let
       configfile /boot/grub/grub.cfg
     fi
     EOF
+
+    # 生成 bootupd 所需的 updates.json 元数据清单，否则 bootupctl 会拒绝安装
+    bootupctl backend generate-update-metadata $out
 
     cat > $out/usr/lib/os-release << 'EOF'
     NAME="NixOS"
@@ -176,12 +180,28 @@ pkgs.dockerTools.buildLayeredImage {
   # 仅将 toplevel 放入 contents，使 buildLayeredImage 按 Nix 依赖图切分 /nix/store
   contents = [ toplevel ];
 
-  # 在最终镜像根目录直接拷贝 bootcPayload 与创建 FHS 骨架，避免 contents 合并丢失 /usr
+  # 在最终镜像根目录直接完成 OSTree/bootc 目录重映射
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
-    mkdir -p usr/bin etc var var/tmp sysroot ostree boot dev proc run tmp
+
+    # [核心修复 1] 将 /nix 迁移到 /usr/nix，并保留空的 /nix/store 供 initrd 绑定挂载
+    if [ -d nix ]; then
+      mv nix usr/nix
+    fi
+    mkdir -p nix/store
+
+    # [核心修复 2] 将 NixOS 生成的 /etc 实体化为 OSTree 标准的 /usr/etc，避免悬空软链接
+    mkdir -p usr/etc
+    if [ -e etc ] || [ -L etc ]; then
+      cp -rL etc/. usr/etc/ 2>/dev/null || true
+      rm -rf etc
+    fi
+
+    # [核心修复 3] 补全 sys 与 boot/efi 等 FHS 挂载点骨架
+    mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
     ln -s ${toplevel} usr/nixos-toplevel
+    ln -sf ${pkgs.bootupd}/bin/bootupctl usr/bin/bootupctl
     rm -rf var/run
     ln -s /run var/run
     chmod 1777 tmp var/tmp
