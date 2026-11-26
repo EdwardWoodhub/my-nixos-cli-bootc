@@ -29,10 +29,9 @@ let
         readonly = true
       '';
 
-      # 补充 bootupd（提供 bootupctl），确保 bootc install 与 bootupctl 可用
+      # 包含 BIOS 与 UEFI 双架构 GRUB 工具链及 bootc/ostree
       environment.systemPackages = with pkgs; [
         bootc
-        bootupd
         ostree
         grub2
         grub2_efi
@@ -101,7 +100,7 @@ let
 
   # 2. 单独预构建内核与双模 bootupd 载荷（纯实体文件）
   bootcPayload = pkgs.runCommand "nixos-bootc-payload" {
-    nativeBuildInputs = with pkgs; [ grub2 grub2_efi bootupd coreutils ];
+    nativeBuildInputs = with pkgs; [ grub2 grub2_efi coreutils ];
   } ''
     mkdir -p $out/usr/lib/ostree
     mkdir -p $out/usr/lib/modules/${kver}
@@ -156,9 +155,6 @@ let
     fi
     EOF
 
-    # 生成 bootupd 所需的 updates.json 元数据清单，否则 bootupctl 会拒绝安装
-    bootupctl backend generate-update-metadata $out
-
     cat > $out/usr/lib/os-release << 'EOF'
     NAME="NixOS"
     ID=nixos
@@ -201,7 +197,6 @@ pkgs.dockerTools.buildLayeredImage {
     # [核心修复 3] 补全 sys 与 boot/efi 等 FHS 挂载点骨架
     mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
     ln -s ${toplevel} usr/nixos-toplevel
-    ln -sf ${pkgs.bootupd}/bin/bootupctl usr/bin/bootupctl
     rm -rf var/run
     ln -s /run var/run
     chmod 1777 tmp var/tmp
