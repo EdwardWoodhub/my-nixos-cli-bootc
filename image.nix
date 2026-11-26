@@ -210,7 +210,7 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.systemd
     kernel
     toplevel
-  ] ++ nixos.lib.optionals (nixos.config.hardware.enableRedistributableFirmware or false) [
+  ] ++ pkgs.lib.optionals (nixos.config.hardware.enableRedistributableFirmware or false) [
     pkgs.linux-firmware
   ];
 
