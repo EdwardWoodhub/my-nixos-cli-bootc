@@ -70,13 +70,16 @@ jobs:
 
       - name: Full E2E Smoke Test (LiveCD Boot -> OSTree Deploy -> Cold Disk Reboot)
         run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
           cp /usr/share/OVMF/OVMF_VARS_4M.fd ./OVMF_VARS.fd
           qemu-img create -f qcow2 ./target-disk.qcow2 25G
 
           python3 - << 'EOF'
           import subprocess, time, sys, os, select, base64
 
-          KVM_ARGS = ["-enable-kvm", "-cpu", "host"] if os.path.exists("/dev/kvm") else ["-cpu", "max"]
+          KVM_ARGS = ["-enable-kvm", "-cpu", "host"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "max"]
           OCI_IMAGE = os.environ["OCI_IMAGE"]
           LIVECD_USER = os.environ["LIVECD_USER"]
 
