@@ -1,0 +1,19 @@
+name: Sync GHCR to Aliyun ACR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Skopeo
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+
+      - name: Sync Image to Aliyun ACR
+        run: |
+          skopeo copy \
+            --src-creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --dest-creds="${{ secrets.ALIYUN_ACR_USERNAME }}:${{ secrets.ALIYUN_ACR_PASSWORD }}" \
+            "docker://ghcr.io/edwardwoodhub/my-nixos-cli-bootc-vm:latest" \
+            "docker://${{ secrets.ALIYUN_ACR_REGISTRY }}/edwardwoodhub/my-nixos-cli-bootc-vm:latest"
