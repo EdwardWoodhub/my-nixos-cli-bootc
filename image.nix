@@ -214,23 +214,28 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.linux-firmware
   ];
 
-  # 在最终镜像根目录直接拷贝 bootcPayload、从 ${toplevel}/etc 实体化 /usr/etc 并写入密码哈希
+  # 在最终镜像根目录直接拷贝 bootcPayload、原样保留软链接生成 /usr/etc 并实体化 shadow 写入密码哈希
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
 
-    # 1. 直接从 ${toplevel}/etc 实体化为 OSTree 标准的 /usr/etc（包含 shadow/passwd/pam.d/ssh/nsswitch.conf）
+    # 1. 保留软链接原样拷贝 ${toplevel}/etc 到 /usr/etc（避免 cp -L 解引用 /dev/null 报错）
     mkdir -p usr/etc
-    cp -rL ${toplevel}/etc/. usr/etc/
+    cp -a ${toplevel}/etc/. usr/etc/
     chmod -R u+w usr/etc
 
-    # 2. 构建期直接写入 root:root 与 nack:nack 的 SHA-512 密码哈希
-    ROOT_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 root)
-    NACK_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 nack)
-    chmod 0640 usr/etc/shadow
-    sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
-    sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
-    chmod 0000 usr/etc/shadow
+    # 2. 单独将 shadow 实体化并写入 root:root 与 nack:nack 的 SHA-512 密码哈希
+    if [ -e usr/etc/shadow ] || [ -L usr/etc/shadow ]; then
+      cp -L usr/etc/shadow usr/etc/shadow.tmp
+      rm -f usr/etc/shadow
+      mv usr/etc/shadow.tmp usr/etc/shadow
+      ROOT_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 root)
+      NACK_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 nack)
+      chmod 0640 usr/etc/shadow
+      sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
+      sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
+      chmod 0000 usr/etc/shadow
+    fi
 
     # 3. 构建 FHS 骨架与关键二进制软链接
     mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
