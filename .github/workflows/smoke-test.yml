@@ -80,7 +80,7 @@ jobs:
           OCI_IMAGE = os.environ["OCI_IMAGE"]
           LIVECD_USER = os.environ["LIVECD_USER"]
 
-          deploy_script = f"""#!/usr/bin/env bash
+          deploy_script = r"""#!/usr/bin/env bash
           set -euxo pipefail
           trap 'echo "DEPLOY_FAILED"' ERR
 
@@ -101,11 +101,11 @@ jobs:
           ostree admin init-fs --modern /mnt
           ostree admin os-init nixos --sysroot=/mnt 2>/dev/null || true
 
-          skopeo copy "{OCI_IMAGE}" oci:/var/work/oci-tmp
+          skopeo copy "$OCI_IMAGE" oci:/var/work/oci-tmp
 
           MANIFEST_DIGEST=$(jq -r '.manifests[0].digest | sub("sha256:"; "")' /var/work/oci-tmp/index.json)
-          for layer in $(jq -r '.layers[].digest | sub("sha256:"; "")' "/var/work/oci-tmp/blobs/sha256/${{MANIFEST_DIGEST}}"); do
-            tar -xf "/var/work/oci-tmp/blobs/sha256/${{layer}}" -C /var/work/rootfs-tmp
+          for layer in $(jq -r '.layers[].digest | sub("sha256:"; "")' "/var/work/oci-tmp/blobs/sha256/${MANIFEST_DIGEST}"); do
+            tar -xf "/var/work/oci-tmp/blobs/sha256/${layer}" -C /var/work/rootfs-tmp
           done
 
           ostree commit --repo=/mnt/ostree/repo --branch=nixos --subject="CI E2E Smoke Test" /var/work/rootfs-tmp
@@ -115,18 +115,18 @@ jobs:
           ROOT_UUID=$(blkid -s UUID -o value /dev/vda2)
           BOOT_UUID=$(blkid -s UUID -o value /dev/vda1)
 
-          ostree admin deploy \\
-            --sysroot=/mnt \\
-            --os=nixos \\
-            --karg="root=UUID=${{ROOT_UUID}}" \\
-            --karg="rw" \\
-            --karg="console=ttyS0,115200" \\
+          ostree admin deploy \
+            --sysroot=/mnt \
+            --os=nixos \
+            --karg="root=UUID=${ROOT_UUID}" \
+            --karg="rw" \
+            --karg="console=ttyS0,115200" \
             nixos
 
           DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
-          cat << FSTAB > "${{DEPLOY_DIR}}/etc/fstab"
-          UUID=${{ROOT_UUID}} / ext4 defaults 0 1
-          UUID=${{BOOT_UUID}} /boot/efi vfat umask=0077 0 2
+          cat << FSTAB > "${DEPLOY_DIR}/etc/fstab"
+          UUID=${ROOT_UUID} / ext4 defaults 0 1
+          UUID=${BOOT_UUID} /boot/efi vfat umask=0077 0 2
           FSTAB
 
           mkdir -p /mnt/boot/efi/loader/entries
@@ -239,7 +239,7 @@ jobs:
                           if sent_login and not sent_deploy and ("$" in buffer[-64:] or "#" in buffer[-64:]):
                               print("\n>>> [AUTO-DEPLOY] 注入 Base64 部署脚本并开始落盘安装...")
                               time.sleep(1)
-                              inject = f"echo '{b64_script}' | base64 -d > /tmp/deploy.sh && chmod +x /tmp/deploy.sh && sudo bash /tmp/deploy.sh\n"
+                              inject = f"echo '{b64_script}' | base64 -d > /tmp/deploy.sh && chmod +x /tmp/deploy.sh && sudo OCI_IMAGE='{OCI_IMAGE}' bash /tmp/deploy.sh\n"
                               proc.stdin.write(inject.encode("utf-8"))
                               proc.stdin.flush()
                               sent_deploy = True
