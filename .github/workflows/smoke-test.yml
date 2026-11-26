@@ -133,10 +133,12 @@ jobs:
             nixos
 
           DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
+          chattr -i "${DEPLOY_DIR}" "${DEPLOY_DIR}/etc" 2>/dev/null || true
           cat << FSTAB > "${DEPLOY_DIR}/etc/fstab"
           UUID=${ROOT_UUID} / ext4 defaults 0 1
           UUID=${BOOT_UUID} /boot/efi vfat umask=0077 0 2
           FSTAB
+          chattr +i "${DEPLOY_DIR}" 2>/dev/null || true
 
           mkdir -p /mnt/boot/efi/loader/entries
           cp -r /mnt/boot/ostree /mnt/boot/efi/
