@@ -7,6 +7,11 @@ on:
       - completed
 
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "指定要测试的 Release Tag（留空则自动拉取最新 Release）"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -19,7 +24,9 @@ env:
 jobs:
   smoke-test-e2e:
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     steps:
       - name: Install QEMU, OVMF, and ISO Inspection Tools
@@ -30,9 +37,20 @@ jobs:
       - name: Download Latest Release ISO Parts and Reassemble
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.release_tag }}
         run: |
-          echo ">>> 获取最新 Release 信息..."
-          LATEST_TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName')
+          if [ -n "$INPUT_TAG" ]; then
+            LATEST_TAG="$INPUT_TAG"
+          else
+            echo ">>> 获取最新 Release 信息..."
+            LATEST_TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName')
+          fi
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "[ERROR] 未找到可用的 Release Tag！" >&2
+            exit 1
+          fi
+
           echo ">>> 正在下载 Release: $LATEST_TAG"
           gh release download "$LATEST_TAG" \
             --repo "${{ github.repository }}" \
@@ -155,7 +173,7 @@ jobs:
               os.set_blocking(fd, False)
 
               start_time = time.time()
-              timeout = 720  # 12 分钟总超时，覆盖镜像拉取与解压
+              timeout = 720
               sent_boot_keys = False
               sent_login = False
               sent_deploy = False
@@ -231,7 +249,6 @@ jobs:
                               print("\n[SUCCESS] 阶段 1 完成：LiveCD 成功将 bootc 镜像部署至虚拟磁盘并安全关机！")
                               return
                       else:
-                          # 阶段 2：脱离 ISO 从虚拟硬盘冷启动，验证目标系统运行态关键挂载与服务状态
                           if not sent_verify and "login:" in buffer:
                               print("\n>>> [AUTO-VERIFY] 目标系统已到达登录提示符，校验 /nix/store 绑定挂载与服务状态...")
                               time.sleep(1)
@@ -264,8 +281,6 @@ jobs:
               print(f"\n[ERROR] [{phase}] QEMU 提前退出且未达到预期里程碑！", file=sys.stderr)
               sys.exit(1)
 
-          # 执行阶段 1：挂载 ISO 与 25G 虚拟磁盘，完成全量部署
           run_qemu("Phase 1: LiveCD Deploy to Disk", with_cdrom=True)
-          # 执行阶段 2：彻底卸载 ISO，纯硬盘冷启动验证目标系统
           run_qemu("Phase 2: Installed System Cold Boot", with_cdrom=False)
           EOF
