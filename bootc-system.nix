@@ -9,7 +9,7 @@
   boot.loader.grub.enable = lib.mkForce false;
   boot.loader.systemd-boot.enable = lib.mkForce false;
 
-  # 2. 清空硬编码根分区、交换分区及 VMware HGFS 自动挂载（消除 mount-hgfs.automount 失败）
+  # 2. 清空硬编码根分区、交换分区及 VMware HGFS 自动挂载
   fileSystems."/" = lib.mkForce {
     device = "none";
     fsType = "tmpfs";
@@ -29,13 +29,16 @@
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 5. 保留 XFCE 桌面软件包，但强制默认以命令行 multi-user.target 启动（需桌面时手动 start display-manager）
+  # 5. 允许 SSH root 密码登录，方便调试与远程管理
+  services.openssh.settings.PermitRootLogin = lib.mkForce "yes";
+
+  # 6. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
   systemd.defaultUnit = lib.mkForce "multi-user.target";
   systemd.services."display-manager".enable = lib.mkForce false;
   boot.initrd.kernelModules = [ "vmwgfx" ];
   services.xserver.videoDrivers = [ "vmware" "modesetting" ];
 
-  # 6. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target，确保开机必出 login:
+  # 7. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target
   systemd.services."getty@tty1" = {
     enable = true;
     wantedBy = [ "multi-user.target" ];
@@ -50,16 +53,17 @@
     serviceConfig.TTYReset = "no";
   };
 
-  # 7. 清空冲突的自动挂载单元，并预创建 HGFS 挂载点与 AccountsService 运行目录
+  # 8. 清空冲突的自动挂载单元，并预创建 SSH 密钥目录、HGFS 挂载点与 AccountsService 目录
   systemd.automounts = lib.mkForce [];
   systemd.tmpfiles.rules = [
+    "d /etc/ssh 0755 root root -"
     "d /mount/hgfs 0755 root root -"
     "d /var/lib/AccountsService 0755 root root -"
     "d /var/lib/AccountsService/users 0700 root root -"
     "d /var/lib/AccountsService/icons 0775 root root -"
   ];
 
-  # 8. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
+  # 9. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
   environment.systemPackages = with pkgs; [
     bootc
     ostree
@@ -68,7 +72,7 @@
     dosfstools
   ];
 
-  # 9. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
+  # 10. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
   environment.variables = {
     PATH = lib.mkForce "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
   };
