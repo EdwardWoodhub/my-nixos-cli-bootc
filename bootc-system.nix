@@ -23,11 +23,14 @@
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 5. 确保 VMware 虚拟显卡驱动在早期加载，避免图形管理器卡在控制台日志界面
+  # 5. 保留 XFCE 桌面软件包，但默认以命令行 multi-user.target 启动（需桌面时手动 start display-manager）
+  systemd.defaultUnit = "multi-user.target";
+  systemd.services."display-manager".enable = lib.mkForce false;
   boot.initrd.kernelModules = [ "vmwgfx" ];
   services.xserver.videoDrivers = [ "vmware" "modesetting" ];
 
-  # 6. 强制启用本地虚拟终端 tty2 与串口终端 ttyS0，确保任何情况下均可切入文本登录
+  # 6. 强制启用本地虚拟终端与串口终端，确保无头 QEMU 冒烟测试与本地台均直接显示 login:
+  systemd.services."getty@tty1".enable = true;
   systemd.services."getty@tty2".enable = true;
   systemd.services."serial-getty@ttyS0".enable = true;
 
