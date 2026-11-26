@@ -9,11 +9,17 @@
   boot.loader.grub.enable = lib.mkForce false;
   boot.loader.systemd-boot.enable = lib.mkForce false;
 
-  # 2. 清空硬编码根分区与交换分区（bootc 运行时通过内核参数 root=UUID=... 动态挂载）
+  # 2. 清空硬编码根分区、交换分区及 VMware HGFS 自动挂载（消除 mount-hgfs.automount 失败）
   fileSystems."/" = lib.mkForce {
     device = "none";
     fsType = "tmpfs";
     neededForBoot = false;
+  };
+  fileSystems."/mount/hgfs" = lib.mkForce {
+    device = "none";
+    fsType = "tmpfs";
+    neededForBoot = false;
+    options = [ "noauto" ];
   };
   swapDevices = lib.mkForce [];
 
