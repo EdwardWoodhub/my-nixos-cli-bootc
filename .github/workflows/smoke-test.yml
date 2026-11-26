@@ -132,12 +132,15 @@ jobs:
             --karg="systemd.gpt_auto=0" \
             nixos
 
+          mount -o remount,rw /mnt
           DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
-          chattr -i "${DEPLOY_DIR}" "${DEPLOY_DIR}/etc" 2>/dev/null || true
+          chattr -R -i "${DEPLOY_DIR}" 2>/dev/null || true
+          rm -f "${DEPLOY_DIR}/etc/fstab"
           cat << FSTAB > "${DEPLOY_DIR}/etc/fstab"
           UUID=${ROOT_UUID} / ext4 defaults 0 1
           UUID=${BOOT_UUID} /boot/efi vfat umask=0077 0 2
           FSTAB
+          chmod 0644 "${DEPLOY_DIR}/etc/fstab"
           chattr +i "${DEPLOY_DIR}" 2>/dev/null || true
 
           mkdir -p /mnt/boot/efi/loader/entries
