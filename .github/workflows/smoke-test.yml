@@ -81,7 +81,6 @@ jobs:
           KVM_ARGS = ["-enable-kvm", "-cpu", "host"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "max"]
           OCI_IMAGE = os.environ["OCI_IMAGE"]
 
-          # 使用 printf 拼接错误标记，避免源码回显触发关键字误判
           deploy_script = r"""#!/usr/bin/env bash
           set -euxo pipefail
           trap 'printf "\n%s_%s\n" "DEPLOY" "FAILED"' ERR
@@ -91,13 +90,16 @@ jobs:
           parted -s /dev/vda set 1 esp on
           parted -s /dev/vda mkpart primary ext4 513MiB 100%
 
-          mkfs.fat -F32 /dev/vda1
-          mkfs.ext4 -q -L root /dev/vda2
+          partprobe /dev/vda || true
+          udevadm settle || sleep 2
 
-          mount /dev/vda2 /mnt
+          mkfs.fat -F32 /dev/vda1
+          mkfs.ext4 -F -q -L root /dev/vda2
+
+          mount -t ext4 /dev/vda2 /mnt
           mkdir -p /mnt/boot/efi /var/work
-          mount /dev/vda1 /mnt/boot/efi
-          mount /dev/vda2 /var/work
+          mount -t vfat /dev/vda1 /mnt/boot/efi
+          mount -t ext4 /dev/vda2 /var/work
           mkdir -p /var/work/oci-tmp /var/work/rootfs-tmp
 
           ostree admin init-fs --modern /mnt
@@ -229,7 +231,6 @@ jobs:
                               sys.exit(1)
 
                       if with_cdrom:
-                          # LiveCD 为 automatic login，检测到自动登录完成且出现 shell 提示符后再注入脚本
                           if not sent_deploy and "automatic login" in buffer and ("nixos@vmNixX11" in buffer[-128:] or "$ " in buffer[-64:]):
                               print("\n>>> [AUTO-DEPLOY] LiveCD 自动登录成功，注入 Base64 部署脚本并开始落盘安装...")
                               time.sleep(1)
