@@ -19,7 +19,6 @@ permissions:
 env:
   IMAGE_NAME: my-nixos-cli-bootc-vm
   OCI_IMAGE: docker://crpi-l49enzwqpgqoazie.cn-hangzhou.personal.cr.aliyuncs.com/edwardwoodhub/my-nixos-cli-bootc-vm:latest
-  LIVECD_USER: nack
 
 jobs:
   smoke-test-e2e:
@@ -81,11 +80,11 @@ jobs:
 
           KVM_ARGS = ["-enable-kvm", "-cpu", "host"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "max"]
           OCI_IMAGE = os.environ["OCI_IMAGE"]
-          LIVECD_USER = os.environ["LIVECD_USER"]
 
+          # 使用 printf 拼接错误标记，避免源码回显触发关键字误判
           deploy_script = r"""#!/usr/bin/env bash
           set -euxo pipefail
-          trap 'echo "DEPLOY_FAILED"' ERR
+          trap 'printf "\n%s_%s\n" "DEPLOY" "FAILED"' ERR
 
           parted -s /dev/vda mklabel gpt
           parted -s /dev/vda mkpart EFI fat32 1MiB 513MiB
@@ -139,7 +138,7 @@ jobs:
 
           sync
           umount -R /mnt
-          echo "DEPLOY_SUCCESS_REBOOTING"
+          printf "\n%s_%s\n" "DEPLOY_SUCCESS" "REBOOTING"
           poweroff
           """
           b64_script = base64.b64encode(deploy_script.encode("utf-8")).decode("ascii")
@@ -178,7 +177,6 @@ jobs:
               start_time = time.time()
               timeout = 720
               sent_boot_keys = False
-              sent_login = False
               sent_deploy = False
               sent_verify = False
               buffer = ""
@@ -189,8 +187,7 @@ jobs:
                   "Failed to mount",
                   "Failed to start Bind mount",
                   "Failed to start Find NixOS closure",
-                  "DEPLOY_FAILED",
-                  "VERIFY_FAILED"
+                  "DEPLOY_FAILED"
               ]
 
               while True:
@@ -232,15 +229,9 @@ jobs:
                               sys.exit(1)
 
                       if with_cdrom:
-                          if not sent_login and "login:" in buffer:
-                              print(f"\n>>> [AUTO-LOGIN] 发送 LiveCD 用户名: {LIVECD_USER}")
-                              time.sleep(1)
-                              proc.stdin.write(f"{LIVECD_USER}\n".encode("utf-8"))
-                              proc.stdin.flush()
-                              sent_login = True
-
-                          if sent_login and not sent_deploy and ("$" in buffer[-64:] or "#" in buffer[-64:]):
-                              print("\n>>> [AUTO-DEPLOY] 注入 Base64 部署脚本并开始落盘安装...")
+                          # LiveCD 为 automatic login，检测到自动登录完成且出现 shell 提示符后再注入脚本
+                          if not sent_deploy and "automatic login" in buffer and ("nixos@vmNixX11" in buffer[-128:] or "$ " in buffer[-64:]):
+                              print("\n>>> [AUTO-DEPLOY] LiveCD 自动登录成功，注入 Base64 部署脚本并开始落盘安装...")
                               time.sleep(1)
                               inject = f"echo '{b64_script}' | base64 -d > /tmp/deploy.sh && chmod +x /tmp/deploy.sh && sudo OCI_IMAGE='{OCI_IMAGE}' bash /tmp/deploy.sh\n"
                               proc.stdin.write(inject.encode("utf-8"))
@@ -262,7 +253,7 @@ jobs:
                                   "findmnt /nix/store && "
                                   "ostree admin status && "
                                   "systemctl is-system-running --wait || true; "
-                                  "echo 'E2E_ALL_PASSED'\n"
+                                  "printf '\\n%s_%s\\n' 'E2E_ALL' 'PASSED'\n"
                               )
                               proc.stdin.write(verify_cmd.encode("utf-8"))
                               proc.stdin.flush()
