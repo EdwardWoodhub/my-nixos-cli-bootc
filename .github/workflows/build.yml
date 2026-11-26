@@ -12,6 +12,12 @@ on:
       - '.github/workflows/smoke-test.yml'
 
   workflow_dispatch:
+    inputs:
+      sync_acr:
+        description: "同步镜像到阿里云 ACR"
+        type: boolean
+        default: false
+  
 
 permissions:
   contents: write
@@ -60,6 +66,7 @@ jobs:
 
       # 5. 使用 Skopeo 同步镜像到阿里云 ACR
       - name: Sync Image to Aliyun ACR using Skopeo
+        if: ${{ inputs.sync_acr == true }}
         run: |
           REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           SRC_IMAGE="docker://ghcr.io/${REPO_OWNER}/${{ env.IMAGE_NAME }}:latest"
