@@ -172,12 +172,17 @@
     isNormalUser = true;
     description = "Nack";
     extraGroups = [ "networkmanager" "wheel" ];
+    initialPassword = "nack";
     packages = with pkgs; [
       kdePackages.kate
 #     thunderbird
       tree
       flatpak
     ];
+  };
+
+  users.users.root = {
+    initialPassword = "root";
   };
 
 
