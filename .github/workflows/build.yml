@@ -9,6 +9,7 @@ on:
       - main
     paths-ignore:
       - "**.md"
+      - '.github/workflows/smoke-test.yml'
 
   workflow_dispatch:
 
