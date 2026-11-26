@@ -127,7 +127,9 @@ jobs:
             --karg="root=UUID=${ROOT_UUID}" \
             --karg="rw" \
             --karg="init=/usr/nixos-toplevel/init" \
+            --karg="console=tty0" \
             --karg="console=ttyS0,115200" \
+            --karg="systemd.gpt_auto=0" \
             nixos
 
           DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
@@ -202,7 +204,6 @@ jobs:
                       proc.kill()
                       sys.exit(1)
 
-                  # 若阶段 2 已进入用户态且发送校验命令超过 15 秒，直接判定冷启动成功并优雅结束
                   if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 15):
                       print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功从硬盘冷启动并进入运行态！")
                       proc.terminate()
@@ -257,9 +258,8 @@ jobs:
                           if not sent_verify and (
                               "login:" in buffer
                               or "Reached target Multi-User System" in buffer
-                              or "Reached target Graphical Interface" in buffer
                           ):
-                              print("\n>>> [AUTO-VERIFY] 目标系统已成功进入用户态，唤醒串口终端并校验运行状态...")
+                              print("\n>>> [AUTO-VERIFY] 目标系统已到达 Multi-User System，唤醒串口终端并执行校验...")
                               verify_triggered_at = time.time()
                               time.sleep(2)
                               proc.stdin.write(b"\n")
