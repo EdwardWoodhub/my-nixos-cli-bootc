@@ -214,26 +214,23 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.linux-firmware
   ];
 
-  # 在最终镜像根目录直接拷贝 bootcPayload、固化密码哈希并创建 FHS 骨架
+  # 在最终镜像根目录直接拷贝 bootcPayload、从 ${toplevel}/etc 实体化 /usr/etc 并写入密码哈希
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
 
-    # 1. 将 NixOS 生成的 /etc 实体化为 OSTree 标准的 /usr/etc
+    # 1. 直接从 ${toplevel}/etc 实体化为 OSTree 标准的 /usr/etc（包含 shadow/passwd/pam.d/ssh/nsswitch.conf）
     mkdir -p usr/etc
-    if [ -e etc ] || [ -L etc ]; then
-      cp -rL etc/. usr/etc/ 2>/dev/null || true
-      rm -rf etc
-    fi
+    cp -rL ${toplevel}/etc/. usr/etc/
+    chmod -R u+w usr/etc
 
-    # 2. 构建期直接写入 root:root 与 nack:nack 的 SHA-512 密码哈希，确保冷启动直接可登录
+    # 2. 构建期直接写入 root:root 与 nack:nack 的 SHA-512 密码哈希
     ROOT_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 root)
     NACK_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 nack)
-    if [ -f usr/etc/shadow ]; then
-      chmod u+w usr/etc/shadow
-      sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
-      sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
-    fi
+    chmod 0640 usr/etc/shadow
+    sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
+    sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
+    chmod 0000 usr/etc/shadow
 
     # 3. 构建 FHS 骨架与关键二进制软链接
     mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
