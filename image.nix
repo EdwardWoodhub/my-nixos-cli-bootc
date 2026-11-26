@@ -214,18 +214,28 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.linux-firmware
   ];
 
-  # 在最终镜像根目录直接拷贝 bootcPayload、转换 /usr/etc 并创建 FHS 骨架与 /bin/login 链接
+  # 在最终镜像根目录直接拷贝 bootcPayload、固化密码哈希并创建 FHS 骨架
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
 
-    # 将 NixOS 生成的 /etc 实体化为 OSTree 标准的 /usr/etc
+    # 1. 将 NixOS 生成的 /etc 实体化为 OSTree 标准的 /usr/etc
     mkdir -p usr/etc
     if [ -e etc ] || [ -L etc ]; then
       cp -rL etc/. usr/etc/ 2>/dev/null || true
       rm -rf etc
     fi
 
+    # 2. 构建期直接写入 root:root 与 nack:nack 的 SHA-512 密码哈希，确保冷启动直接可登录
+    ROOT_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 root)
+    NACK_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 nack)
+    if [ -f usr/etc/shadow ]; then
+      chmod u+w usr/etc/shadow
+      sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
+      sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
+    fi
+
+    # 3. 构建 FHS 骨架与关键二进制软链接
     mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
     ln -s ${toplevel} usr/nixos-toplevel
     ln -s /run/current-system/sw/bin/login usr/bin/login
