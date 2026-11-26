@@ -172,7 +172,7 @@
     isNormalUser = true;
     description = "Nack";
     extraGroups = [ "networkmanager" "wheel" ];
-    initialPassword = "nack";
+    password = "nack";
     packages = with pkgs; [
       kdePackages.kate
 #     thunderbird
@@ -182,7 +182,7 @@
   };
 
   users.users.root = {
-    initialPassword = "root";
+    password = "root";
   };
 
 
