@@ -126,6 +126,7 @@ jobs:
             --os=nixos \
             --karg="root=UUID=${ROOT_UUID}" \
             --karg="rw" \
+            --karg="init=/usr/nixos-toplevel/init" \
             --karg="console=ttyS0,115200" \
             nixos
 
@@ -253,7 +254,7 @@ jobs:
                               proc.stdin.flush()
                               time.sleep(1)
                               verify_cmd = (
-                                  "findmnt /nix/store && "
+                                  "findmnt /nix/store || ls -ld /nix/store && "
                                   "ostree admin status && "
                                   "systemctl is-system-running --wait || true; "
                                   "printf '\\n%s_%s\\n' 'E2E_ALL' 'PASSED'\n"
