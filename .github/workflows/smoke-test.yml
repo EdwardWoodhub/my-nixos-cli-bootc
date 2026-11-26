@@ -185,7 +185,7 @@ jobs:
               timeout = 720
               sent_boot_keys = False
               sent_deploy = False
-              sent_verify = False
+              verify_state = "wait_login"
               verify_triggered_at = None
               buffer = ""
 
@@ -204,10 +204,10 @@ jobs:
                       proc.kill()
                       sys.exit(1)
 
-                  if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 15):
-                      print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功从硬盘冷启动并进入运行态！")
-                      proc.terminate()
-                      return
+                  if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 30):
+                      print("\n[ERROR] [Phase 2] 登录校验超时未完成！", file=sys.stderr)
+                      proc.kill()
+                      sys.exit(1)
 
                   rlist, _, _ = select.select([fd], [], [], 1.0)
                   if rlist:
@@ -255,16 +255,24 @@ jobs:
                               print("\n[SUCCESS] 阶段 1 完成：LiveCD 成功将 bootc 镜像部署至虚拟磁盘并安全关机！")
                               return
                       else:
-                          if not sent_verify and "login:" in buffer:
-                              print("\n>>> [AUTO-VERIFY] 检测到串口 login: 提示符，自动登录 root 并执行校验...")
+                          if verify_state == "wait_login" and "login:" in buffer[-128:]:
+                              print("\n>>> [AUTO-VERIFY] 检测到 login: 提示符，发送用户名 root...")
                               verify_triggered_at = time.time()
-                              time.sleep(1)
+                              time.sleep(0.5)
                               proc.stdin.write(b"root\n")
                               proc.stdin.flush()
-                              time.sleep(1.5)
+                              verify_state = "wait_password"
+
+                          elif verify_state == "wait_password" and "Password:" in buffer[-64:]:
+                              print("\n>>> [AUTO-VERIFY] 检测到 Password: 提示符，发送密码 root...")
+                              time.sleep(0.5)
                               proc.stdin.write(b"root\n")
                               proc.stdin.flush()
-                              time.sleep(2)
+                              verify_state = "wait_shell"
+
+                          elif verify_state == "wait_shell" and ("#" in buffer[-32:] or "$" in buffer[-32:]):
+                              print("\n>>> [AUTO-VERIFY] 成功进入 root shell，执行运行态校验...")
+                              time.sleep(0.5)
                               verify_cmd = (
                                   "ls -ld /nix/store && "
                                   "ostree admin status && "
@@ -273,7 +281,7 @@ jobs:
                               )
                               proc.stdin.write(verify_cmd.encode("utf-8"))
                               proc.stdin.flush()
-                              sent_verify = True
+                              verify_state = "done"
 
                           if "E2E_ALL_PASSED" in buffer:
                               print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功冷启动、登录并通过全部运行态校验！")
