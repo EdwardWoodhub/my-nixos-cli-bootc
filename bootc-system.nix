@@ -29,16 +29,29 @@
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 5. 允许 SSH root 密码登录，方便调试与远程管理
-  services.openssh.settings.PermitRootLogin = lib.mkForce "yes";
+  # 5. 禁用在 ostree 只读根下易报错的冗余后台服务（NetworkManager 已接管 DNS 与网络）
+  services.nscd.enable = lib.mkForce false;
+  networking.wireless.enable = lib.mkForce false;
+  systemd.services."wpa_supplicant".enable = lib.mkForce false;
+  services.logrotate.enable = lib.mkForce false;
 
-  # 6. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
+  # 6. 配置 OpenSSH 将主机密钥生成在可写的 /var/lib/ssh 目录，并允许 root 密码登录
+  services.openssh = {
+    enable = true;
+    settings.PermitRootLogin = lib.mkForce "yes";
+    hostKeys = [
+      { path = "/var/lib/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
+      { path = "/var/lib/ssh/ssh_host_rsa_key"; type = "rsa"; bits = 4096; }
+    ];
+  };
+
+  # 7. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
   systemd.defaultUnit = lib.mkForce "multi-user.target";
   systemd.services."display-manager".enable = lib.mkForce false;
   boot.initrd.kernelModules = [ "vmwgfx" ];
   services.xserver.videoDrivers = [ "vmware" "modesetting" ];
 
-  # 7. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target
+  # 8. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target
   systemd.services."getty@tty1" = {
     enable = true;
     wantedBy = [ "multi-user.target" ];
@@ -53,17 +66,18 @@
     serviceConfig.TTYReset = "no";
   };
 
-  # 8. 清空冲突的自动挂载单元，并预创建 SSH 密钥目录、HGFS 挂载点与 AccountsService 目录
+  # 9. 清空冲突的自动挂载单元，并预创建 SSH 密钥目录、HGFS 挂载点与 AccountsService 目录
   systemd.automounts = lib.mkForce [];
   systemd.tmpfiles.rules = [
     "d /etc/ssh 0755 root root -"
+    "d /var/lib/ssh 0700 root root -"
     "d /mount/hgfs 0755 root root -"
     "d /var/lib/AccountsService 0755 root root -"
     "d /var/lib/AccountsService/users 0700 root root -"
     "d /var/lib/AccountsService/icons 0775 root root -"
   ];
 
-  # 9. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
+  # 10. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
   environment.systemPackages = with pkgs; [
     bootc
     ostree
@@ -72,7 +86,7 @@
     dosfstools
   ];
 
-  # 10. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
+  # 11. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
   environment.variables = {
     PATH = lib.mkForce "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
   };
