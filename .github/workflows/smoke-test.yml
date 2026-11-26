@@ -18,7 +18,7 @@ permissions:
 
 env:
   IMAGE_NAME: my-nixos-cli-bootc-vm
-  OCI_IMAGE: docker://crpi-l49enzwqpgqoazie.cn-hangzhou.personal.cr.aliyuncs.com/edwardwoodhub/my-nixos-cli-bootc-vm:latest
+  OCI_IMAGE: docker://ghcr.io/edwardwoodhub/my-nixos-cli-bootc-vm:latest
 
 jobs:
   smoke-test-e2e:
