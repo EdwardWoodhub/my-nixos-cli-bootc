@@ -135,12 +135,26 @@ jobs:
           mount -o remount,rw /mnt
           DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
           chattr -R -i "${DEPLOY_DIR}" 2>/dev/null || true
+
           rm -f "${DEPLOY_DIR}/etc/fstab"
           cat << FSTAB > "${DEPLOY_DIR}/etc/fstab"
           UUID=${ROOT_UUID} / ext4 defaults 0 1
           UUID=${BOOT_UUID} /boot/efi vfat umask=0077 0 2
           FSTAB
           chmod 0644 "${DEPLOY_DIR}/etc/fstab"
+
+          ROOT_HASH=$(openssl passwd -6 root)
+          NACK_HASH=$(openssl passwd -6 nack)
+          if [ -L "${DEPLOY_DIR}/etc/shadow" ]; then
+            cp -L "${DEPLOY_DIR}/etc/shadow" "${DEPLOY_DIR}/etc/shadow.new"
+            rm -f "${DEPLOY_DIR}/etc/shadow"
+            mv "${DEPLOY_DIR}/etc/shadow.new" "${DEPLOY_DIR}/etc/shadow"
+          fi
+          sed -i "s|^root:[^:]*:|root:${ROOT_HASH}:|" "${DEPLOY_DIR}/etc/shadow"
+          sed -i "s|^nack:[^:]*:|nack:${NACK_HASH}:|" "${DEPLOY_DIR}/etc/shadow"
+          chown 0:0 "${DEPLOY_DIR}/etc/shadow"
+          chmod 0640 "${DEPLOY_DIR}/etc/shadow"
+
           chattr +i "${DEPLOY_DIR}" 2>/dev/null || true
 
           mkdir -p /mnt/boot/efi/loader/entries
