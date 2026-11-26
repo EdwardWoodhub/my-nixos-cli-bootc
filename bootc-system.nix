@@ -17,8 +17,8 @@
   };
   swapDevices = lib.mkForce [];
 
-  # 3. 禁用 systemd-gpt-auto-generator，避免自动生成的 /efi 挂载单元与 /boot/efi 冲突
-  boot.kernelParams = [ "systemd.gpt_auto=0" ];
+  # 3. 显式配置双控制台输出并禁用 systemd-gpt-auto-generator，防止 /efi 冲突挂载
+  boot.kernelParams = [ "console=tty0" "console=ttyS0,115200" "systemd.gpt_auto=0" ];
 
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
@@ -29,12 +29,23 @@
   boot.initrd.kernelModules = [ "vmwgfx" ];
   services.xserver.videoDrivers = [ "vmware" "modesetting" ];
 
-  # 6. 强制启用本地虚拟终端与串口终端，确保无头 QEMU 冒烟测试与本地控制台均直接显示 login:
-  systemd.services."getty@tty1".enable = true;
-  systemd.services."getty@tty2".enable = true;
-  systemd.services."serial-getty@ttyS0".enable = true;
+  # 6. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target，确保开机必出 login:
+  systemd.services."getty@tty1" = {
+    enable = true;
+    wantedBy = [ "multi-user.target" ];
+  };
+  systemd.services."getty@tty2" = {
+    enable = true;
+    wantedBy = [ "multi-user.target" ];
+  };
+  systemd.services."serial-getty@ttyS0" = {
+    enable = true;
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig.TTYReset = "no";
+  };
 
-  # 7. 预创建 HGFS 挂载点与 AccountsService 目录，确保不可变只读根文件系统下零报错启动
+  # 7. 清空冲突的自动挂载单元，并预创建 HGFS 挂载点与 AccountsService 运行目录
+  systemd.automounts = lib.mkForce [];
   systemd.tmpfiles.rules = [
     "d /mount/hgfs 0755 root root -"
     "d /var/lib/AccountsService 0755 root root -"
