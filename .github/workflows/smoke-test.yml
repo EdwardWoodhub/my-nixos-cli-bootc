@@ -255,22 +255,20 @@ jobs:
                               print("\n[SUCCESS] 阶段 1 完成：LiveCD 成功将 bootc 镜像部署至虚拟磁盘并安全关机！")
                               return
                       else:
-                          if not sent_verify and (
-                              "login:" in buffer
-                              or "Reached target Multi-User System" in buffer
-                          ):
-                              print("\n>>> [AUTO-VERIFY] 目标系统已到达 Multi-User System，唤醒串口终端并执行校验...")
+                          if not sent_verify and "login:" in buffer:
+                              print("\n>>> [AUTO-VERIFY] 检测到串口 login: 提示符，自动登录 root 并执行校验...")
                               verify_triggered_at = time.time()
-                              time.sleep(2)
-                              proc.stdin.write(b"\n")
-                              proc.stdin.flush()
                               time.sleep(1)
                               proc.stdin.write(b"root\n")
                               proc.stdin.flush()
-                              time.sleep(1)
+                              time.sleep(1.5)
+                              proc.stdin.write(b"root\n")
+                              proc.stdin.flush()
+                              time.sleep(2)
                               verify_cmd = (
                                   "ls -ld /nix/store && "
                                   "ostree admin status && "
+                                  "systemctl --failed && "
                                   "printf '\\n%s_%s\\n' 'E2E_ALL' 'PASSED'\n"
                               )
                               proc.stdin.write(verify_cmd.encode("utf-8"))
@@ -278,7 +276,7 @@ jobs:
                               sent_verify = True
 
                           if "E2E_ALL_PASSED" in buffer:
-                              print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功从硬盘冷启动并进入运行态！")
+                              print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功冷启动、登录并通过全部运行态校验！")
                               proc.terminate()
                               return
 
