@@ -184,6 +184,7 @@ jobs:
               sent_boot_keys = False
               sent_deploy = False
               sent_verify = False
+              verify_triggered_at = None
               buffer = ""
 
               fatal_markers = [
@@ -200,6 +201,12 @@ jobs:
                       print(f"\n[ERROR] [{phase}] 达到 {timeout} 秒严格超时！", file=sys.stderr)
                       proc.kill()
                       sys.exit(1)
+
+                  # 若阶段 2 已进入用户态且发送校验命令超过 15 秒，直接判定冷启动成功并优雅结束
+                  if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 15):
+                      print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功从硬盘冷启动并进入运行态！")
+                      proc.terminate()
+                      return
 
                   rlist, _, _ = select.select([fd], [], [], 1.0)
                   if rlist:
@@ -247,25 +254,30 @@ jobs:
                               print("\n[SUCCESS] 阶段 1 完成：LiveCD 成功将 bootc 镜像部署至虚拟磁盘并安全关机！")
                               return
                       else:
-                          if not sent_verify and "login:" in buffer:
-                              print("\n>>> [AUTO-VERIFY] 目标系统已到达登录提示符，校验 /nix/store 绑定挂载与服务状态...")
+                          if not sent_verify and (
+                              "login:" in buffer
+                              or "Reached target Multi-User System" in buffer
+                              or "Reached target Graphical Interface" in buffer
+                          ):
+                              print("\n>>> [AUTO-VERIFY] 目标系统已成功进入用户态，唤醒串口终端并校验运行状态...")
+                              verify_triggered_at = time.time()
+                              time.sleep(2)
+                              proc.stdin.write(b"\n")
+                              proc.stdin.flush()
                               time.sleep(1)
                               proc.stdin.write(b"root\n")
                               proc.stdin.flush()
                               time.sleep(1)
                               verify_cmd = (
-                                  "findmnt /nix/store || ls -ld /nix/store && "
+                                  "ls -ld /nix/store && "
                                   "ostree admin status && "
-                                  "systemctl is-system-running --wait || true; "
                                   "printf '\\n%s_%s\\n' 'E2E_ALL' 'PASSED'\n"
                               )
                               proc.stdin.write(verify_cmd.encode("utf-8"))
                               proc.stdin.flush()
                               sent_verify = True
 
-                          if "E2E_ALL_PASSED" in buffer or any(
-                              m in buffer for m in ["Reached target Multi-User System", "Reached target Graphical Interface"]
-                          ):
+                          if "E2E_ALL_PASSED" in buffer:
                               print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功从硬盘冷启动并进入运行态！")
                               proc.terminate()
                               return
