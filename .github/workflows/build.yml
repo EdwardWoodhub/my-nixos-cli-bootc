@@ -10,6 +10,7 @@ on:
     paths-ignore:
       - "**.md"
       - '.github/workflows/smoke-test.yml'
+      - '.github/workflows/sync-acr.yml'
 
   workflow_dispatch:
     inputs:
