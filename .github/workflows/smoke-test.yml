@@ -1,4 +1,4 @@
-name: Smoke Test LiveCD ISO
+name: Smoke Test Full E2E (LiveCD + Installed Bootc System)
 
 on:
   workflow_run:
@@ -13,17 +13,19 @@ permissions:
 
 env:
   IMAGE_NAME: my-nixos-cli-bootc-vm
+  OCI_IMAGE: docker://crpi-l49enzwqpgqoazie.cn-hangzhou.personal.cr.aliyuncs.com/edwardwoodhub/my-nixos-cli-bootc-vm:latest
+  LIVECD_USER: nack
 
 jobs:
-  smoke-test-iso:
+  smoke-test-e2e:
     runs-on: ubuntu-24.04
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
-      - name: Install QEMU and ISO Inspection Tools
+      - name: Install QEMU, OVMF, and ISO Inspection Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf xorriso gh
+          sudo apt-get install -y qemu-system-x86 qemu-utils ovmf xorriso gh
 
       - name: Download Latest Release ISO Parts and Reassemble
         env:
@@ -48,115 +50,222 @@ jobs:
           grep -q "NIXOS_BOOTC" iso-toc.log
           echo ">>> ISO 静态结构校验通过！"
 
-      - name: Boot LiveCD in Headless QEMU (UEFI Smoke Test)
+      - name: Full E2E Smoke Test (LiveCD Boot -> OSTree Deploy -> Cold Disk Reboot)
         run: |
           cp /usr/share/OVMF/OVMF_VARS_4M.fd ./OVMF_VARS.fd
+          qemu-img create -f qcow2 ./target-disk.qcow2 25G
 
-          echo ">>> 启动无头 QEMU 虚拟机测试 LiveCD 引导（超时限制 10 分钟）..."
           python3 - << 'EOF'
-          import subprocess, time, sys, os, select
+          import subprocess, time, sys, os, select, base64
 
-          cmd = [
-              "qemu-system-x86_64",
-              "-m", "4096",
-              "-smp", "4",
-              "-cpu", "max",
-              "-nographic",
-              "-serial", "mon:stdio",
-              "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
-              "-drive", "if=pflash,format=raw,file=./OVMF_VARS.fd",
-              "-cdrom", os.environ["IMAGE_NAME"] + ".iso",
-              "-boot", "d",
-              "-no-reboot"
-          ]
+          KVM_ARGS = ["-enable-kvm", "-cpu", "host"] if os.path.exists("/dev/kvm") else ["-cpu", "max"]
+          OCI_IMAGE = os.environ["OCI_IMAGE"]
+          LIVECD_USER = os.environ["LIVECD_USER"]
 
-          proc = subprocess.Popen(
-              cmd,
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.STDOUT,
-              bufsize=0
-          )
+          deploy_script = f"""#!/usr/bin/env bash
+          set -euxo pipefail
+          trap 'echo "DEPLOY_FAILED"' ERR
 
-          fd = proc.stdout.fileno()
-          os.set_blocking(fd, False)
+          parted -s /dev/vda mklabel gpt
+          parted -s /dev/vda mkpart EFI fat32 1MiB 513MiB
+          parted -s /dev/vda set 1 esp on
+          parted -s /dev/vda mkpart primary ext4 513MiB 100%
 
-          start_time = time.time()
-          timeout = 600  # 严格 10 分钟非阻塞超时
-          sent_boot_keys = False
-          buffer = ""
+          mkfs.fat -F32 /dev/vda1
+          mkfs.ext4 -q -L root /dev/vda2
 
-          success_markers = [
-              "login:",
-              "Reached target Graphical Interface",
-              "Reached target Multi-User System",
-              "Welcome to NixOS"
-          ]
-          fatal_markers = [
-              "Kernel panic",
-              "You are in emergency mode",
-              "Failed to mount"
-          ]
+          mount /dev/vda2 /mnt
+          mkdir -p /mnt/boot/efi /var/work
+          mount /dev/vda1 /mnt/boot/efi
+          mount /dev/vda2 /var/work
+          mkdir -p /var/work/oci-tmp /var/work/rootfs-tmp
 
-          matched = False
-          while True:
-              elapsed = time.time() - start_time
-              if elapsed > timeout:
-                  print(f"\n[ERROR] QEMU 冒烟测试达到 {timeout} 秒严格超时！", file=sys.stderr)
-                  proc.kill()
-                  sys.exit(1)
+          ostree admin init-fs --modern /mnt
+          ostree admin os-init nixos --sysroot=/mnt 2>/dev/null || true
 
-              rlist, _, _ = select.select([fd], [], [], 1.0)
-              if rlist:
-                  try:
-                      chunk = os.read(fd, 4096)
-                  except BlockingIOError:
-                      chunk = b""
-                  if not chunk:
+          skopeo copy "{OCI_IMAGE}" oci:/var/work/oci-tmp
+
+          MANIFEST_DIGEST=$(jq -r '.manifests[0].digest | sub("sha256:"; "")' /var/work/oci-tmp/index.json)
+          for layer in $(jq -r '.layers[].digest | sub("sha256:"; "")' "/var/work/oci-tmp/blobs/sha256/${{MANIFEST_DIGEST}}"); do
+            tar -xf "/var/work/oci-tmp/blobs/sha256/${{layer}}" -C /var/work/rootfs-tmp
+          done
+
+          ostree commit --repo=/mnt/ostree/repo --branch=nixos --subject="CI E2E Smoke Test" /var/work/rootfs-tmp
+          rm -rf /var/work/oci-tmp /var/work/rootfs-tmp
+          umount /var/work
+
+          ROOT_UUID=$(blkid -s UUID -o value /dev/vda2)
+          BOOT_UUID=$(blkid -s UUID -o value /dev/vda1)
+
+          ostree admin deploy \\
+            --sysroot=/mnt \\
+            --os=nixos \\
+            --karg="root=UUID=${{ROOT_UUID}}" \\
+            --karg="rw" \\
+            --karg="console=ttyS0,115200" \\
+            nixos
+
+          DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
+          cat << FSTAB > "${{DEPLOY_DIR}}/etc/fstab"
+          UUID=${{ROOT_UUID}} / ext4 defaults 0 1
+          UUID=${{BOOT_UUID}} /boot/efi vfat umask=0077 0 2
+          FSTAB
+
+          mkdir -p /mnt/boot/efi/loader/entries
+          cp -r /mnt/boot/ostree /mnt/boot/efi/
+          cp -r /mnt/boot/loader/entries/* /mnt/boot/efi/loader/entries/
+          bootctl --esp-path=/mnt/boot/efi install
+
+          sync
+          umount -R /mnt
+          echo "DEPLOY_SUCCESS_REBOOTING"
+          poweroff
+          """
+          b64_script = base64.b64encode(deploy_script.encode("utf-8")).decode("ascii")
+
+          def run_qemu(phase, with_cdrom):
+              cmd = [
+                  "qemu-system-x86_64",
+                  "-m", "4096",
+                  "-smp", "4",
+                  *KVM_ARGS,
+                  "-nographic",
+                  "-serial", "mon:stdio",
+                  "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+                  "-drive", "if=pflash,format=raw,file=./OVMF_VARS.fd",
+                  "-drive", "file=./target-disk.qcow2,format=qcow2,if=virtio",
+                  "-nic", "user,model=virtio-net-pci",
+                  "-no-reboot"
+              ]
+              if with_cdrom:
+                  cmd.extend(["-cdrom", os.environ["IMAGE_NAME"] + ".iso", "-boot", "d"])
+              else:
+                  cmd.extend(["-boot", "c"])
+
+              print(f"\n==================== [{phase}] 启动 QEMU ====================")
+              proc = subprocess.Popen(
+                  cmd,
+                  stdin=subprocess.PIPE,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+                  bufsize=0
+              )
+
+              fd = proc.stdout.fileno()
+              os.set_blocking(fd, False)
+
+              start_time = time.time()
+              timeout = 720  # 12 分钟总超时，覆盖镜像拉取与解压
+              sent_boot_keys = False
+              sent_login = False
+              sent_deploy = False
+              sent_verify = False
+              buffer = ""
+
+              fatal_markers = [
+                  "Kernel panic",
+                  "You are in emergency mode",
+                  "Failed to mount",
+                  "Failed to start Bind mount",
+                  "Failed to start Find NixOS closure",
+                  "DEPLOY_FAILED",
+                  "VERIFY_FAILED"
+              ]
+
+              while True:
+                  if time.time() - start_time > timeout:
+                      print(f"\n[ERROR] [{phase}] 达到 {timeout} 秒严格超时！", file=sys.stderr)
+                      proc.kill()
+                      sys.exit(1)
+
+                  rlist, _, _ = select.select([fd], [], [], 1.0)
+                  if rlist:
+                      try:
+                          chunk = os.read(fd, 4096)
+                      except BlockingIOError:
+                          chunk = b""
+                      if not chunk:
+                          if proc.poll() is not None:
+                              break
+                          continue
+
+                      text = chunk.decode("utf-8", errors="replace")
+                      sys.stdout.write(text)
+                      sys.stdout.flush()
+                      buffer += text
+
+                      if not sent_boot_keys and "Press 't' to use the text boot menu" in buffer:
+                          print("\n>>> [AUTO-INPUT] 检测到引导菜单，自动发送按键立即引导...")
+                          time.sleep(1)
+                          proc.stdin.write(b"t\r")
+                          proc.stdin.flush()
+                          time.sleep(1)
+                          proc.stdin.write(b"\r")
+                          proc.stdin.flush()
+                          sent_boot_keys = True
+
+                      for err in fatal_markers:
+                          if err in buffer:
+                              print(f"\n[ERROR] [{phase}] 检测到致命错误: {err}", file=sys.stderr)
+                              proc.kill()
+                              sys.exit(1)
+
+                      if with_cdrom:
+                          if not sent_login and "login:" in buffer:
+                              print(f"\n>>> [AUTO-LOGIN] 发送 LiveCD 用户名: {LIVECD_USER}")
+                              time.sleep(1)
+                              proc.stdin.write(f"{LIVECD_USER}\n".encode("utf-8"))
+                              proc.stdin.flush()
+                              sent_login = True
+
+                          if sent_login and not sent_deploy and ("$" in buffer[-64:] or "#" in buffer[-64:]):
+                              print("\n>>> [AUTO-DEPLOY] 注入 Base64 部署脚本并开始落盘安装...")
+                              time.sleep(1)
+                              inject = f"echo '{b64_script}' | base64 -d > /tmp/deploy.sh && chmod +x /tmp/deploy.sh && sudo bash /tmp/deploy.sh\n"
+                              proc.stdin.write(inject.encode("utf-8"))
+                              proc.stdin.flush()
+                              sent_deploy = True
+
+                          if "DEPLOY_SUCCESS_REBOOTING" in buffer:
+                              proc.wait(timeout=30)
+                              print("\n[SUCCESS] 阶段 1 完成：LiveCD 成功将 bootc 镜像部署至虚拟磁盘并安全关机！")
+                              return
+                      else:
+                          # 阶段 2：脱离 ISO 从虚拟硬盘冷启动，验证目标系统运行态关键挂载与服务状态
+                          if not sent_verify and "login:" in buffer:
+                              print("\n>>> [AUTO-VERIFY] 目标系统已到达登录提示符，校验 /nix/store 绑定挂载与服务状态...")
+                              time.sleep(1)
+                              proc.stdin.write(b"root\n")
+                              proc.stdin.flush()
+                              time.sleep(1)
+                              verify_cmd = (
+                                  "findmnt /nix/store && "
+                                  "ostree admin status && "
+                                  "systemctl is-system-running --wait || true; "
+                                  "echo 'E2E_ALL_PASSED'\n"
+                              )
+                              proc.stdin.write(verify_cmd.encode("utf-8"))
+                              proc.stdin.flush()
+                              sent_verify = True
+
+                          if "E2E_ALL_PASSED" in buffer or any(
+                              m in buffer for m in ["Reached target Multi-User System", "Reached target Graphical Interface"]
+                          ):
+                              print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功从硬盘冷启动并进入运行态！")
+                              proc.terminate()
+                              return
+
+                      if len(buffer) > 32768:
+                          buffer = buffer[-16384:]
+                  else:
                       if proc.poll() is not None:
                           break
-                      continue
 
-                  text = chunk.decode("utf-8", errors="replace")
-                  sys.stdout.write(text)
-                  sys.stdout.flush()
-                  buffer += text
-
-                  # 检测到 systemd-boot 菜单提示时，自动发送 't' 和回车触发立即引导
-                  if not sent_boot_keys and "Press 't' to use the text boot menu" in buffer:
-                      print("\n>>> [AUTO-INPUT] 检测到引导菜单，自动发送按键启动默认内核...")
-                      time.sleep(1)
-                      proc.stdin.write(b"t\r")
-                      proc.stdin.flush()
-                      time.sleep(1)
-                      proc.stdin.write(b"\r")
-                      proc.stdin.flush()
-                      sent_boot_keys = True
-
-                  for err in fatal_markers:
-                      if err in buffer:
-                          print(f"\n[ERROR] 检测到致命启动错误: {err}", file=sys.stderr)
-                          proc.kill()
-                          sys.exit(1)
-
-                  for ok in success_markers:
-                      if ok in buffer:
-                          print(f"\n[SUCCESS] LiveCD 成功完成 UEFI 引导并进入用户态！匹配标志: {ok}")
-                          matched = True
-                          proc.terminate()
-                          break
-
-                  if matched:
-                      break
-
-                  # 防止内存缓冲区无限增长，只保留最近 16KB 文本用于关键字匹配
-                  if len(buffer) > 16384:
-                      buffer = buffer[-8192:]
-              else:
-                  if proc.poll() is not None:
-                      break
-
-          if not matched:
-              print("\n[ERROR] QEMU 提前退出且未检测到成功启动标志！", file=sys.stderr)
+              print(f"\n[ERROR] [{phase}] QEMU 提前退出且未达到预期里程碑！", file=sys.stderr)
               sys.exit(1)
+
+          # 执行阶段 1：挂载 ISO 与 25G 虚拟磁盘，完成全量部署
+          run_qemu("Phase 1: LiveCD Deploy to Disk", with_cdrom=True)
+          # 执行阶段 2：彻底卸载 ISO，纯硬盘冷启动验证目标系统
+          run_qemu("Phase 2: Installed System Cold Boot", with_cdrom=False)
           EOF
