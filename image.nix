@@ -198,17 +198,23 @@ let
   '';
 
 in
-# 3. 打包为 41 层均衡分布的 bootc 镜像
+# 3. 打包为 100 层均衡分布的 bootc 镜像
 pkgs.dockerTools.buildLayeredImage {
   name = imageName;
   tag = imageTag;
   created = "now";
-  maxLayers = 41;
+  maxLayers = 100;
 
-  # 仅将 toplevel 放入 contents，使 buildLayeredImage 按 Nix 依赖图切分 /nix/store
-  contents = [ toplevel ];
+  contents = [
+    pkgs.glibc
+    pkgs.systemd
+    kernel
+    toplevel
+  ] ++ nixos.lib.optionals (nixos.config.hardware.enableRedistributableFirmware or false) [
+    pkgs.linux-firmware
+  ];
 
-  # 在最终镜像根目录直接拷贝 bootcPayload、转换 /usr/etc 并创建 FHS 骨架
+  # 在最终镜像根目录直接拷贝 bootcPayload、转换 /usr/etc 并创建 FHS 骨架与 /bin/login 链接
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
@@ -222,6 +228,8 @@ pkgs.dockerTools.buildLayeredImage {
 
     mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
     ln -s ${toplevel} usr/nixos-toplevel
+    ln -s /run/current-system/sw/bin/login usr/bin/login
+    ln -s /run/current-system/sw/bin/sh usr/bin/sh
     rm -rf var/run
     ln -s /run var/run
     chmod 1777 tmp var/tmp
