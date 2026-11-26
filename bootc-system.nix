@@ -13,6 +13,7 @@
   fileSystems."/" = lib.mkForce {
     device = "none";
     fsType = "tmpfs";
+    neededForBoot = false;
   };
   swapDevices = lib.mkForce [];
 
