@@ -14,6 +14,38 @@ let
       boot.loader.grub.enable = false;
       boot.initrd.systemd.enable = true;
 
+      # 将 ostree-prepare-root 注入 initrd，在 find-nixos-closure 之前把 /sysroot 切换到当前 OSTree 部署目录
+      boot.initrd.systemd.extraBin."ostree-prepare-root" = "${pkgs.ostree}/lib/ostree/ostree-prepare-root";
+      boot.initrd.systemd.contents."/etc/ostree/prepare-root.conf".text = ''
+        [composefs]
+        enabled = no
+
+        [sysroot]
+        readonly = true
+      '';
+
+      boot.initrd.systemd.services.ostree-prepare-root = {
+        description = "OSTree Prepare Root";
+        wantedBy = [ "initrd-root-fs.target" ];
+        after = [ "sysroot.mount" ];
+        before = [ "initrd-root-fs.target" "initrd-find-nixos-closure.service" "initrd-parse-etc.service" ];
+        unitConfig = {
+          DefaultDependencies = false;
+          ConditionKernelCommandLine = "ostree";
+        };
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "/bin/ostree-prepare-root /sysroot";
+        };
+      };
+
+      # 确保 NixOS initrd 在 ostree-prepare-root 切换完 /sysroot 之后再查找闭包
+      boot.initrd.systemd.services.initrd-find-nixos-closure = {
+        after = [ "ostree-prepare-root.service" ];
+        requires = [ "ostree-prepare-root.service" ];
+      };
+
       boot.initrd.availableKernelModules = [
         "nvme" "xhci_pci" "ahci" "usbhid" "sd_mod" "sr_mod"
         "vmw_pvscsi" "vmw_vmci" "vmwgfx" "e1000" "e1000e" "vmxnet3"
@@ -122,7 +154,7 @@ let
     readonly = true
     EOF
 
-    # UEFI BOOTX64.EFI（移除写死的 gpt3 分区号，改由内嵌 grub.cfg 动态搜索）
+    # UEFI BOOTX64.EFI
     ${pkgs.grub2_efi}/bin/grub-mkimage \
       --format=x86_64-efi \
       --directory=${pkgs.grub2_efi}/lib/grub/x86_64-efi \
@@ -176,25 +208,18 @@ pkgs.dockerTools.buildLayeredImage {
   # 仅将 toplevel 放入 contents，使 buildLayeredImage 按 Nix 依赖图切分 /nix/store
   contents = [ toplevel ];
 
-  # 在最终镜像根目录直接完成 OSTree/bootc 目录重映射
+  # 在最终镜像根目录直接拷贝 bootcPayload、转换 /usr/etc 并创建 FHS 骨架
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
 
-    # [核心修复 1] 将 /nix 迁移到 /usr/nix，并保留空的 /nix/store 供 initrd 绑定挂载
-    if [ -d nix ]; then
-      mv nix usr/nix
-    fi
-    mkdir -p nix/store
-
-    # [核心修复 2] 将 NixOS 生成的 /etc 实体化为 OSTree 标准的 /usr/etc，避免悬空软链接
+    # 将 NixOS 生成的 /etc 实体化为 OSTree 标准的 /usr/etc
     mkdir -p usr/etc
     if [ -e etc ] || [ -L etc ]; then
       cp -rL etc/. usr/etc/ 2>/dev/null || true
       rm -rf etc
     fi
 
-    # [核心修复 3] 补全 sys 与 boot/efi 等 FHS 挂载点骨架
     mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
     ln -s ${toplevel} usr/nixos-toplevel
     rm -rf var/run
