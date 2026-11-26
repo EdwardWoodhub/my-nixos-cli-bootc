@@ -73,7 +73,7 @@ jobs:
             sudo chmod 666 /dev/kvm
           fi
           cp /usr/share/OVMF/OVMF_VARS_4M.fd ./OVMF_VARS.fd
-          qemu-img create -f qcow2 ./target-disk.qcow2 25G
+          qemu-img create -f qcow2 ./target-disk.qcow2 40G
 
           python3 - << 'EOF'
           import subprocess, time, sys, os, select, base64
@@ -110,10 +110,12 @@ jobs:
           MANIFEST_DIGEST=$(jq -r '.manifests[0].digest | sub("sha256:"; "")' /var/work/oci-tmp/index.json)
           for layer in $(jq -r '.layers[].digest | sub("sha256:"; "")' "/var/work/oci-tmp/blobs/sha256/${MANIFEST_DIGEST}"); do
             tar -xf "/var/work/oci-tmp/blobs/sha256/${layer}" -C /var/work/rootfs-tmp
+            rm -f "/var/work/oci-tmp/blobs/sha256/${layer}"
           done
+          rm -rf /var/work/oci-tmp
 
           ostree commit --repo=/mnt/ostree/repo --branch=nixos --subject="CI E2E Smoke Test" /var/work/rootfs-tmp
-          rm -rf /var/work/oci-tmp /var/work/rootfs-tmp
+          rm -rf /var/work/rootfs-tmp
           umount /var/work
 
           ROOT_UUID=$(blkid -s UUID -o value /dev/vda2)
