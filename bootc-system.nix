@@ -23,13 +23,13 @@
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 5. 保留 XFCE 桌面软件包，但默认以命令行 multi-user.target 启动（需桌面时手动 start display-manager）
-  systemd.defaultUnit = "multi-user.target";
+  # 5. 保留 XFCE 桌面软件包，但强制默认以命令行 multi-user.target 启动（需桌面时手动 start display-manager）
+  systemd.defaultUnit = lib.mkForce "multi-user.target";
   systemd.services."display-manager".enable = lib.mkForce false;
   boot.initrd.kernelModules = [ "vmwgfx" ];
   services.xserver.videoDrivers = [ "vmware" "modesetting" ];
 
-  # 6. 强制启用本地虚拟终端与串口终端，确保无头 QEMU 冒烟测试与本地台均直接显示 login:
+  # 6. 强制启用本地虚拟终端与串口终端，确保无头 QEMU 冒烟测试与本地控制台均直接显示 login:
   systemd.services."getty@tty1".enable = true;
   systemd.services."getty@tty2".enable = true;
   systemd.services."serial-getty@ttyS0".enable = true;
