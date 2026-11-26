@@ -214,15 +214,16 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.linux-firmware
   ];
 
-  # 在最终镜像根目录直接拷贝 bootcPayload、原样保留软链接生成 /usr/etc 并实体化 shadow 写入密码哈希
+  # 在最终镜像根目录直接拷贝 bootcPayload、原样保留软链接生成 /usr/etc、清除顶层 /etc 并写入密码哈希
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
 
-    # 1. 保留软链接原样拷贝 ${toplevel}/etc 到 /usr/etc（避免 cp -L 解引用 /dev/null 报错）
+    # 1. 保留软链接原样拷贝 ${toplevel}/etc 到 /usr/etc，并清除顶层 /etc
     mkdir -p usr/etc
     cp -a ${toplevel}/etc/. usr/etc/
     chmod -R u+w usr/etc
+    rm -rf etc
 
     # 2. 单独将 shadow 实体化并写入 root:root 与 nack:nack 的 SHA-512 密码哈希
     if [ -e usr/etc/shadow ] || [ -L usr/etc/shadow ]; then
