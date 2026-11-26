@@ -29,14 +29,15 @@
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 5. 禁用在 ostree 只读根下易报错的冗余后台服务（禁用 nscd 时需同步清空 nssModules）
+  # 5. 禁用在 ostree 只读根下易报错的冗余后台服务
   services.nscd.enable = lib.mkForce false;
   system.nssModules = lib.mkForce [];
+  systemd.oomd.enable = lib.mkForce false;
   networking.wireless.enable = lib.mkForce false;
   systemd.services."wpa_supplicant".enable = lib.mkForce false;
   services.logrotate.enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH 将主机密钥生成在可写的 /var/lib/ssh 目录，并允许 root 密码登录
+  # 6. 配置 OpenSSH 将主机密钥生成在可写的 /var/lib/ssh 目录，并在生成前确保目录存在
   services.openssh = {
     enable = true;
     settings.PermitRootLogin = lib.mkForce "yes";
@@ -45,6 +46,10 @@
       { path = "/var/lib/ssh/ssh_host_rsa_key"; type = "rsa"; bits = 4096; }
     ];
   };
+  systemd.services."sshd-keygen".preStart = lib.mkBefore ''
+    mkdir -p /var/lib/ssh /etc/ssh
+    chmod 0700 /var/lib/ssh
+  '';
 
   # 7. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
   systemd.defaultUnit = lib.mkForce "multi-user.target";
