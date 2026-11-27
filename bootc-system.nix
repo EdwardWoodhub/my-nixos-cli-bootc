@@ -19,7 +19,7 @@
     device = "/dev/disk/by-label/root";
     fsType = "ext4";
     neededForBoot = false;
-    options = [ "defaults" ];
+    options = [ "defaults" "nofail" ];
   };
   fileSystems."/mount/hgfs" = lib.mkForce {
     device = "none";
@@ -42,19 +42,16 @@
   networking.wireless.enable = lib.mkForce false;
   systemd.services."wpa_supplicant".enable = lib.mkForce false;
   services.logrotate.enable = lib.mkForce false;
+  systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH 将主机密钥生成在可写的 /var/lib/ssh 目录，并在生成前确保目录存在
+  # 6. 配置 OpenSSH（使用默认 /etc/ssh 路径，并在生成密钥前确保目录存在）
   services.openssh = {
     enable = true;
     settings.PermitRootLogin = lib.mkForce "yes";
-    hostKeys = [
-      { path = "/var/lib/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
-      { path = "/var/lib/ssh/ssh_host_rsa_key"; type = "rsa"; bits = 4096; }
-    ];
   };
   systemd.services."sshd-keygen".preStart = lib.mkBefore ''
-    mkdir -p /var/lib/ssh /etc/ssh /var/empty
-    chmod 0700 /var/lib/ssh
+    mkdir -p /etc/ssh /var/empty
+    chmod 0755 /etc/ssh
     chmod 0555 /var/empty
   '';
 
@@ -85,7 +82,6 @@
     "d /root 0700 root root -"
     "d /var/empty 0555 root root -"
     "d /etc/ssh 0755 root root -"
-    "d /var/lib/ssh 0700 root root -"
     "d /mount/hgfs 0755 root root -"
     "d /var/lib/AccountsService 0755 root root -"
     "d /var/lib/AccountsService/users 0700 root root -"
