@@ -134,11 +134,12 @@ jobs:
 
           mount -o remount,rw /mnt
           DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
-          chattr -R -i "${DEPLOY_DIR}" 2>/dev/null || true
+          STATEROOT_VAR="/mnt/ostree/deploy/nixos/var"
+          mkdir -p "${STATEROOT_VAR}/home/nack" "${STATEROOT_VAR}/roothome" "${STATEROOT_VAR}/opt" "${STATEROOT_VAR}/srv" "${STATEROOT_VAR}/mnt/hgfs" "${STATEROOT_VAR}/usrlocal"
+          chown 1000:100 "${STATEROOT_VAR}/home/nack"
+          chmod 0700 "${STATEROOT_VAR}/home/nack" "${STATEROOT_VAR}/roothome"
 
-          mkdir -p "${DEPLOY_DIR}/root" "${DEPLOY_DIR}/var/empty" "${DEPLOY_DIR}/etc/ssh"
-          chmod 0700 "${DEPLOY_DIR}/root"
-          chmod 0555 "${DEPLOY_DIR}/var/empty"
+          chattr -R -i "${DEPLOY_DIR}" 2>/dev/null || true
 
           rm -f "${DEPLOY_DIR}/etc/fstab"
           cat << FSTAB_EOF > "${DEPLOY_DIR}/etc/fstab"
@@ -148,36 +149,6 @@ jobs:
           FSTAB_EOF
           chmod 0644 "${DEPLOY_DIR}/etc/fstab"
 
-          ROOT_HASH=$(mkpasswd -m sha-512 root)
-          NACK_HASH=$(mkpasswd -m sha-512 nack)
-
-          rm -f "${DEPLOY_DIR}/etc/passwd"
-          cat << 'PASSWD_EOF' > "${DEPLOY_DIR}/etc/passwd"
-          root:x:0:0:System administrator:/root:/run/current-system/sw/bin/bash
-          sshd:x:498:498:SSH privilege separation user:/var/empty:/run/current-system/sw/bin/nologin
-          systemd-timesync:x:499:499:systemd Time Synchronization:/var/empty:/run/current-system/sw/bin/nologin
-          nobody:x:65534:65534:Unprivileged account:/var/empty:/run/current-system/sw/bin/nologin
-          nack:x:1000:100:Nack:/home/nack:/run/current-system/sw/bin/bash
-          PASSWD_EOF
-
-          rm -f "${DEPLOY_DIR}/etc/group"
-          cat << 'GROUP_EOF' > "${DEPLOY_DIR}/etc/group"
-          root:x:0:
-          wheel:x:1:nack
-          users:x:100:nack
-          sshd:x:498:
-          systemd-timesync:x:499:
-          nogroup:x:65534:
-          GROUP_EOF
-
-          rm -f "${DEPLOY_DIR}/etc/shadow"
-          cat << SHADOW_EOF > "${DEPLOY_DIR}/etc/shadow"
-          root:${ROOT_HASH}:19000:0:99999:7:::
-          sshd:!:19000:0:99999:7:::
-          systemd-timesync:!:19000:0:99999:7:::
-          nobody:!:19000:0:99999:7:::
-          nack:${NACK_HASH}:19000:0:99999:7:::
-          SHADOW_EOF
           chown 0:0 "${DEPLOY_DIR}/etc/passwd" "${DEPLOY_DIR}/etc/group" "${DEPLOY_DIR}/etc/shadow"
           chmod 0644 "${DEPLOY_DIR}/etc/passwd" "${DEPLOY_DIR}/etc/group"
           chmod 0640 "${DEPLOY_DIR}/etc/shadow"
@@ -317,13 +288,16 @@ jobs:
                               verify_state = "wait_shell"
 
                           elif verify_state == "wait_shell" and ("#" in buffer[-32:] or "$" in buffer[-32:]):
-                              print("\n>>> [AUTO-VERIFY] 成功进入 root shell，执行运行态校验...")
+                              print("\n>>> [AUTO-VERIFY] 成功进入 root shell，执行严格运行态断言...")
                               time.sleep(0.5)
                               verify_cmd = (
-                                  "mountpoint -q /sysroot || mount /dev/disk/by-label/root /sysroot; "
+                                  "set -e; "
+                                  "test \"$(readlink /home)\" = \"var/home\"; "
+                                  "test \"$(readlink /ostree)\" = \"sysroot/ostree\"; "
                                   "ls -ld /nix/store; "
                                   "ostree admin status; "
-                                  "systemctl --failed --no-pager; "
+                                  "systemctl is-active sshd; "
+                                  "test \"$(systemctl --failed --no-legend | wc -l)\" -eq 0; "
                                   "printf '\\n%s_%s\\n' 'E2E_ALL' 'PASSED'\n"
                               )
                               proc.stdin.write(verify_cmd.encode("utf-8"))
@@ -331,7 +305,7 @@ jobs:
                               verify_state = "done"
 
                           if "E2E_ALL_PASSED" in buffer:
-                              print("\n[SUCCESS] 阶段 2 完成：目标 bootc 系统已脱离 ISO 成功冷启动、登录并通过全部运行态校验！")
+                              print("\n[SUCCESS] 阶段 2 完成：全部 FHS 软链接、OSTree 状态、SSH 与零失败服务断言通过！")
                               proc.terminate()
                               return
 
