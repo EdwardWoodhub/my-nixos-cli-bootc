@@ -69,9 +69,9 @@
     serviceConfig.ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -f /run/sshd_config";
   };
 
-  # 7. 确保 /boot/loader 与 /boot/ostree 路径在运行时始终对 ostree admin / bootc 可见
+  # 7. 使用 bind-mount 将物理根分区的 /sysroot/boot/{loader,ostree} 挂载到 /boot/{loader,ostree}（避免 OSTree 拒绝绝对路径软链接）
   systemd.services."ostree-boot-link" = {
-    description = "Ensure /boot/loader and /boot/ostree are visible for ostree/bootc";
+    description = "Bind-mount /boot/loader and /boot/ostree for ostree/bootc";
     wantedBy = [ "local-fs.target" "multi-user.target" ];
     after = [ "local-fs.target" ];
     serviceConfig = {
@@ -79,16 +79,16 @@
       RemainAfterExit = true;
     };
     script = ''
-      mkdir -p /boot
-      if [ ! -e /boot/loader ] && [ -d /sysroot/boot/loader ]; then
-        ln -s /sysroot/boot/loader /boot/loader
-      elif [ ! -e /boot/loader ] && [ -d /boot/efi/loader ]; then
-        ln -s /boot/efi/loader /boot/loader
+      mkdir -p /boot/loader /boot/ostree
+      if [ -d /sysroot/boot/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/loader; then
+        ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/loader /boot/loader
+      elif [ -d /boot/efi/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/loader; then
+        ${pkgs.util-linux}/bin/mount --bind /boot/efi/loader /boot/loader
       fi
-      if [ ! -e /boot/ostree ] && [ -d /sysroot/boot/ostree ]; then
-        ln -s /sysroot/boot/ostree /boot/ostree
-      elif [ ! -e /boot/ostree ] && [ -d /boot/efi/ostree ]; then
-        ln -s /boot/efi/ostree /boot/ostree
+      if [ -d /sysroot/boot/ostree ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/ostree; then
+        ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/ostree /boot/ostree
+      elif [ -d /boot/efi/ostree ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/ostree; then
+        ${pkgs.util-linux}/bin/mount --bind /boot/efi/ostree /boot/ostree
       fi
     '';
   };
