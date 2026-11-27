@@ -23,8 +23,13 @@
   };
   swapDevices = lib.mkForce [];
 
-  # 3. 显式配置双控制台输出并禁用 systemd-gpt-auto-generator，防止 /efi 冲突挂载
-  boot.kernelParams = [ "console=tty0" "console=ttyS0,115200" "systemd.gpt_auto=0" ];
+  # 3. 显式配置双控制台输出，并禁用 systemd-gpt-auto-generator 与 systemd-ssh-generator
+  boot.kernelParams = [
+    "console=tty0"
+    "console=ttyS0,115200"
+    "systemd.gpt_auto=0"
+    "systemd.ssh_auto=no"
+  ];
 
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
@@ -38,9 +43,10 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH（显式挂载到 multi-user.target 确保随系统自启）
+  # 6. 配置常驻 OpenSSH 守护进程（关闭 socket 激活，直接由 multi-user.target 拉起 sshd.service）
   services.openssh = {
     enable = true;
+    startWhenNeeded = false;
     settings = {
       PermitRootLogin = lib.mkForce "yes";
       PasswordAuthentication = lib.mkForce true;
@@ -67,6 +73,7 @@
     '';
   };
   systemd.services."sshd" = {
+    enable = true;
     wantedBy = [ "multi-user.target" ];
     after = [ "sshd-keygen.service" "network.target" ];
     requires = [ "sshd-keygen.service" ];
