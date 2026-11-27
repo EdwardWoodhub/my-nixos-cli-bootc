@@ -38,7 +38,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH（确保 sshd-keygen 先于 sshd 执行，并生成无缩进的标准 /run/sshd_config）
+  # 6. 配置 OpenSSH（显式挂载到 multi-user.target 确保随系统自启）
   services.openssh = {
     enable = true;
     settings = {
@@ -67,6 +67,7 @@
     '';
   };
   systemd.services."sshd" = {
+    wantedBy = [ "multi-user.target" ];
     after = [ "sshd-keygen.service" "network.target" ];
     requires = [ "sshd-keygen.service" ];
     serviceConfig = {
