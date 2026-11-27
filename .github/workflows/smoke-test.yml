@@ -143,8 +143,8 @@ jobs:
           FSTAB
           chmod 0644 "${DEPLOY_DIR}/etc/fstab"
 
-          ROOT_HASH=$(openssl passwd -6 root)
-          NACK_HASH=$(openssl passwd -6 nack)
+          ROOT_HASH=$(mkpasswd -m sha-512 root 2>/dev/null || python3 -c 'import crypt; print(crypt.crypt("root", crypt.mksalt(crypt.METHOD_SHA512)))')
+          NACK_HASH=$(mkpasswd -m sha-512 nack 2>/dev/null || python3 -c 'import crypt; print(crypt.crypt("nack", crypt.mksalt(crypt.METHOD_SHA512)))')
           if [ -L "${DEPLOY_DIR}/etc/shadow" ]; then
             cp -L "${DEPLOY_DIR}/etc/shadow" "${DEPLOY_DIR}/etc/shadow.new"
             rm -f "${DEPLOY_DIR}/etc/shadow"
