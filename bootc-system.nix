@@ -38,7 +38,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH（使用独立生成的 /run/sshd_config 与主机密钥，确保 sshd.service 零依赖稳定启动）
+  # 6. 配置 OpenSSH（确保 sshd-keygen 先于 sshd 执行，并生成无缩进的标准 /run/sshd_config）
   services.openssh = {
     enable = true;
     settings = {
@@ -48,30 +48,36 @@
     };
   };
   systemd.services."sshd-keygen" = {
+    wantedBy = [ "multi-user.target" ];
     script = lib.mkForce ''
-      mkdir -p /etc/ssh /var/empty
+      mkdir -p /etc/ssh /var/empty /run
       chmod 0755 /etc/ssh
       chmod 0555 /var/empty
       ${pkgs.openssh}/bin/ssh-keygen -A
-      cat > /run/sshd_config << 'EOF'
-      Port 22
-      HostKey /etc/ssh/ssh_host_ed25519_key
-      HostKey /etc/ssh/ssh_host_rsa_key
-      PermitRootLogin yes
-      PasswordAuthentication yes
-      UsePAM yes
-      PidFile /run/sshd.pid
-      Subsystem sftp ${pkgs.openssh}/libexec/sftp-server
-      EOF
+      printf '%s\n' \
+        'Port 22' \
+        'HostKey /etc/ssh/ssh_host_ed25519_key' \
+        'HostKey /etc/ssh/ssh_host_rsa_key' \
+        'PermitRootLogin yes' \
+        'PasswordAuthentication yes' \
+        'UsePAM yes' \
+        'PidFile /run/sshd.pid' \
+        'Subsystem sftp ${pkgs.openssh}/libexec/sftp-server' \
+        > /run/sshd_config
     '';
   };
   systemd.services."sshd" = {
-    serviceConfig.ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -f /run/sshd_config";
+    after = [ "sshd-keygen.service" "network.target" ];
+    requires = [ "sshd-keygen.service" ];
+    serviceConfig = {
+      ExecStartPre = lib.mkForce "${pkgs.openssh}/bin/sshd -t -f /run/sshd_config";
+      ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -f /run/sshd_config";
+    };
   };
 
-  # 7. 使用 bind-mount 将物理根分区的 /sysroot/boot/{loader,ostree} 挂载到 /boot/{loader,ostree}（避免 OSTree 拒绝绝对路径软链接）
+  # 7. 将整个 /sysroot/boot 绑定挂载到 /boot，保留 /boot/loader -> loader.1 的原生相对软链接结构
   systemd.services."ostree-boot-link" = {
-    description = "Bind-mount /boot/loader and /boot/ostree for ostree/bootc";
+    description = "Bind-mount /sysroot/boot to /boot for ostree/bootc";
     wantedBy = [ "local-fs.target" "multi-user.target" ];
     after = [ "local-fs.target" ];
     serviceConfig = {
@@ -79,16 +85,12 @@
       RemainAfterExit = true;
     };
     script = ''
-      mkdir -p /boot/loader /boot/ostree
-      if [ -d /sysroot/boot/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/loader; then
-        ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/loader /boot/loader
-      elif [ -d /boot/efi/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/loader; then
-        ${pkgs.util-linux}/bin/mount --bind /boot/efi/loader /boot/loader
-      fi
-      if [ -d /sysroot/boot/ostree ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/ostree; then
-        ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/ostree /boot/ostree
-      elif [ -d /boot/efi/ostree ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/ostree; then
-        ${pkgs.util-linux}/bin/mount --bind /boot/efi/ostree /boot/ostree
+      mkdir -p /boot
+      if [ -d /sysroot/boot/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot; then
+        ${pkgs.util-linux}/bin/mount --bind /sysroot/boot /boot
+        if ${pkgs.util-linux}/bin/mountpoint -q /sysroot/boot/efi && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/efi; then
+          ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/efi /boot/efi
+        fi
       fi
     '';
   };
