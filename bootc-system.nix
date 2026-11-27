@@ -29,8 +29,9 @@
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 5. 禁用在 ostree 只读根下易报错的冗余后台服务（保留默认 NSS 模块以支持 PAM/SSH 完整解析）
+  # 5. 禁用在 ostree 只读根下易报错的冗余后台服务（NixOS 断言要求关闭 nscd 时必须同时清空 nssModules）
   services.nscd.enable = lib.mkForce false;
+  system.nssModules = lib.mkForce [];
   systemd.oomd.enable = lib.mkForce false;
   networking.wireless.enable = lib.mkForce false;
   systemd.services."wpa_supplicant".enable = lib.mkForce false;
