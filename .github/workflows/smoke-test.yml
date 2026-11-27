@@ -145,7 +145,8 @@ jobs:
           cat << FSTAB_EOF > "${DEPLOY_DIR}/etc/fstab"
           UUID=${ROOT_UUID} / ext4 defaults 0 1
           UUID=${ROOT_UUID} /sysroot ext4 defaults 0 0
-          UUID=${BOOT_UUID} /boot/efi vfat umask=0077 0 2
+          /sysroot/boot /boot none bind,x-systemd.requires=/sysroot 0 0
+          UUID=${BOOT_UUID} /boot/efi vfat umask=0077,x-systemd.requires=/boot 0 2
           FSTAB_EOF
           chmod 0644 "${DEPLOY_DIR}/etc/fstab"
 
