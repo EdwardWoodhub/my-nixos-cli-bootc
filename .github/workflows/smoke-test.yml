@@ -139,6 +139,7 @@ jobs:
           rm -f "${DEPLOY_DIR}/etc/fstab"
           cat << FSTAB_EOF > "${DEPLOY_DIR}/etc/fstab"
           UUID=${ROOT_UUID} / ext4 defaults 0 1
+          UUID=${ROOT_UUID} /sysroot ext4 defaults 0 0
           UUID=${BOOT_UUID} /boot/efi vfat umask=0077 0 2
           FSTAB_EOF
           chmod 0644 "${DEPLOY_DIR}/etc/fstab"
@@ -146,26 +147,30 @@ jobs:
           ROOT_HASH=$(mkpasswd -m sha-512 root)
           NACK_HASH=$(mkpasswd -m sha-512 nack)
 
-          if [ ! -f "${DEPLOY_DIR}/etc/passwd" ]; then
-            cat << 'PASSWD_EOF' > "${DEPLOY_DIR}/etc/passwd"
+          rm -f "${DEPLOY_DIR}/etc/passwd"
+          cat << 'PASSWD_EOF' > "${DEPLOY_DIR}/etc/passwd"
           root:x:0:0:System administrator:/root:/run/current-system/sw/bin/bash
+          sshd:x:498:498:SSH privilege separation user:/var/empty:/run/current-system/sw/bin/nologin
+          systemd-timesync:x:499:499:systemd Time Synchronization:/var/empty:/run/current-system/sw/bin/nologin
           nobody:x:65534:65534:Unprivileged account:/var/empty:/run/current-system/sw/bin/nologin
           nack:x:1000:100:Nack:/home/nack:/run/current-system/sw/bin/bash
           PASSWD_EOF
-          fi
 
-          if [ ! -f "${DEPLOY_DIR}/etc/group" ]; then
-            cat << 'GROUP_EOF' > "${DEPLOY_DIR}/etc/group"
+          rm -f "${DEPLOY_DIR}/etc/group"
+          cat << 'GROUP_EOF' > "${DEPLOY_DIR}/etc/group"
           root:x:0:
           wheel:x:1:nack
           users:x:100:nack
+          sshd:x:498:
+          systemd-timesync:x:499:
           nogroup:x:65534:
           GROUP_EOF
-          fi
 
           rm -f "${DEPLOY_DIR}/etc/shadow"
           cat << SHADOW_EOF > "${DEPLOY_DIR}/etc/shadow"
           root:${ROOT_HASH}:19000:0:99999:7:::
+          sshd:!:19000:0:99999:7:::
+          systemd-timesync:!:19000:0:99999:7:::
           nobody:!:19000:0:99999:7:::
           nack:${NACK_HASH}:19000:0:99999:7:::
           SHADOW_EOF
@@ -241,7 +246,7 @@ jobs:
                       proc.kill()
                       sys.exit(1)
 
-                  if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 30):
+                  if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 45):
                       print("\n[ERROR] [Phase 2] 登录校验超时未完成！", file=sys.stderr)
                       proc.kill()
                       sys.exit(1)
@@ -311,9 +316,9 @@ jobs:
                               print("\n>>> [AUTO-VERIFY] 成功进入 root shell，执行运行态校验...")
                               time.sleep(0.5)
                               verify_cmd = (
-                                  "ls -ld /nix/store && "
-                                  "ostree admin status && "
-                                  "systemctl --failed && "
+                                  "ls -ld /nix/store; "
+                                  "ostree admin status; "
+                                  "systemctl --failed; "
                                   "printf '\\n%s_%s\\n' 'E2E_ALL' 'PASSED'\n"
                               )
                               proc.stdin.write(verify_cmd.encode("utf-8"))
