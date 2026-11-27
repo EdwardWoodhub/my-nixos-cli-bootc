@@ -130,6 +130,39 @@ let
   initrd = nixos.config.system.build.initialRamdisk;
   kver = kernel.modDirVersion;
 
+  # 从 NixOS 评估配置中全量导出所有声明的用户与用户组（含系统服务账号）
+  allUsers = nixos.config.users.users;
+  allGroups = nixos.config.users.groups;
+
+  passwdLines = pkgs.lib.mapAttrsToList (name: u:
+    let
+      uid = toString (if u.uid != null then u.uid else 999);
+      gid = toString (
+        if u.group != null && builtins.hasAttr u.group allGroups && allGroups.${u.group}.gid != null
+        then allGroups.${u.group}.gid
+        else (if name == "root" then 0 else 100)
+      );
+      desc = if u.description != null then u.description else name;
+      home = if u.home != null then u.home else "/var/empty";
+      shell = if u.shell != null then "${u.shell}" else "/run/current-system/sw/bin/nologin";
+    in "${name}:x:${uid}:${gid}:${desc}:${home}:${shell}"
+  ) (pkgs.lib.filterAttrs (_: u: u.uid != null) allUsers);
+
+  groupLines = pkgs.lib.mapAttrsToList (name: g:
+    let
+      gid = toString g.gid;
+      members = pkgs.lib.concatStringsSep "," (g.members or []);
+    in "${name}:x:${gid}:${members}"
+  ) (pkgs.lib.filterAttrs (_: g: g.gid != null) allGroups);
+
+  shadowLines = pkgs.lib.mapAttrsToList (name: _:
+    "${name}:!:19000:0:99999:7:::"
+  ) (pkgs.lib.filterAttrs (_: u: u.uid != null) allUsers);
+
+  generatedPasswd = pkgs.writeText "nixos-bootc-passwd" (pkgs.lib.concatStringsSep "\n" passwdLines + "\n");
+  generatedGroup = pkgs.writeText "nixos-bootc-group" (pkgs.lib.concatStringsSep "\n" groupLines + "\n");
+  generatedShadow = pkgs.writeText "nixos-bootc-shadow" (pkgs.lib.concatStringsSep "\n" shadowLines + "\n");
+
   # 2. 单独预构建内核与双模 bootupd 载荷（纯实体文件）
   bootcPayload = pkgs.runCommand "nixos-bootc-payload" {
     nativeBuildInputs = with pkgs; [ grub2 grub2_efi coreutils ];
@@ -214,7 +247,7 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.linux-firmware
   ];
 
-  # 在最终镜像根目录直接拷贝 bootcPayload、原样保留软链接生成 /usr/etc、清除顶层 /etc 并写入密码哈希
+  # 构建标准 OSTree/bootc 目录拓扑并写入全量 NixOS 系统账号
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
@@ -225,26 +258,31 @@ pkgs.dockerTools.buildLayeredImage {
     chmod -R u+w usr/etc
     rm -rf etc
 
-    # 2. 单独将 shadow 实体化并写入 root:root 与 nack:nack 的 SHA-512 密码哈希
-    if [ -e usr/etc/shadow ] || [ -L usr/etc/shadow ]; then
-      cp -L usr/etc/shadow usr/etc/shadow.tmp
-      rm -f usr/etc/shadow
-      mv usr/etc/shadow.tmp usr/etc/shadow
-      ROOT_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 root)
-      NACK_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 nack)
-      chmod 0640 usr/etc/shadow
-      sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
-      sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
-      chmod 0000 usr/etc/shadow
-    fi
+    # 2. 写入全量 NixOS 系统账号数据库（passwd / group / shadow）并固化 root 与 nack 密码哈希
+    cp ${generatedPasswd} usr/etc/passwd
+    cp ${generatedGroup} usr/etc/group
+    cp ${generatedShadow} usr/etc/shadow
+    ROOT_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 root)
+    NACK_HASH=$(${pkgs.mkpasswd}/bin/mkpasswd -m sha-512 nack)
+    chmod 0644 usr/etc/passwd usr/etc/group
+    chmod 0640 usr/etc/shadow
+    sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
+    sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
 
-    # 3. 构建 FHS 骨架与关键二进制软链接
-    mkdir -p usr/bin var var/tmp sysroot ostree boot boot/efi dev proc sys run tmp
+    # 3. 构建标准 OSTree/bootc FHS 软链接拓扑（所有跨版本持久化状态统一收敛到 /var）
+    mkdir -p usr/bin var var/tmp sysroot boot boot/efi dev proc sys run tmp
+    rm -rf home root opt srv mnt ostree usr/local var/run
+    ln -s var/home home
+    ln -s var/roothome root
+    ln -s var/opt opt
+    ln -s var/srv srv
+    ln -s var/mnt mnt
+    ln -s sysroot/ostree ostree
+    ln -s ../var/usrlocal usr/local
+    ln -s /run var/run
     ln -s ${toplevel} usr/nixos-toplevel
     ln -s /run/current-system/sw/bin/login usr/bin/login
     ln -s /run/current-system/sw/bin/sh usr/bin/sh
-    rm -rf var/run
-    ln -s /run var/run
     chmod 1777 tmp var/tmp
   '';
 
