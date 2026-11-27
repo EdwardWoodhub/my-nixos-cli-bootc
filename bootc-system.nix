@@ -44,7 +44,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH 并使用 ssh-keygen -A 确保主机密钥在 /etc/ssh 正常生成
+  # 6. 配置 OpenSSH 并重写 sshd-keygen 脚本确保主机密钥在 /etc/ssh 正常生成
   services.openssh = {
     enable = true;
     settings = {
@@ -54,7 +54,7 @@
     };
   };
   systemd.services."sshd-keygen" = {
-    preStart = lib.mkBefore ''
+    script = lib.mkForce ''
       mkdir -p /etc/ssh /var/empty
       chmod 0755 /etc/ssh
       chmod 0555 /var/empty
