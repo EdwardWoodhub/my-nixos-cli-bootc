@@ -9,11 +9,17 @@
   boot.loader.grub.enable = lib.mkForce false;
   boot.loader.systemd-boot.enable = lib.mkForce false;
 
-  # 2. 清空硬编码根分区、交换分区及 VMware HGFS 自动挂载
+  # 2. 配置根文件系统与 /sysroot（ostree admin / bootc 依赖 /sysroot/ostree/repo）
   fileSystems."/" = lib.mkForce {
     device = "none";
     fsType = "tmpfs";
     neededForBoot = false;
+  };
+  fileSystems."/sysroot" = lib.mkForce {
+    device = "/dev/disk/by-label/root";
+    fsType = "ext4";
+    neededForBoot = false;
+    options = [ "defaults" ];
   };
   fileSystems."/mount/hgfs" = lib.mkForce {
     device = "none";
@@ -47,8 +53,9 @@
     ];
   };
   systemd.services."sshd-keygen".preStart = lib.mkBefore ''
-    mkdir -p /var/lib/ssh /etc/ssh
+    mkdir -p /var/lib/ssh /etc/ssh /var/empty
     chmod 0700 /var/lib/ssh
+    chmod 0555 /var/empty
   '';
 
   # 7. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
@@ -72,9 +79,11 @@
     serviceConfig.TTYReset = "no";
   };
 
-  # 9. 清空冲突的自动挂载单元，并预创建 SSH 密钥目录、HGFS 挂载点与 AccountsService 目录
+  # 9. 清空冲突的自动挂载单元，并预创建 /root、/var/empty、SSH 密钥目录与 AccountsService 目录
   systemd.automounts = lib.mkForce [];
   systemd.tmpfiles.rules = [
+    "d /root 0700 root root -"
+    "d /var/empty 0555 root root -"
     "d /etc/ssh 0755 root root -"
     "d /var/lib/ssh 0700 root root -"
     "d /mount/hgfs 0755 root root -"
