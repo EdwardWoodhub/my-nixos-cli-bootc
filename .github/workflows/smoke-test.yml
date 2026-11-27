@@ -136,6 +136,10 @@ jobs:
           DEPLOY_DIR=$(ls -d /mnt/ostree/deploy/nixos/deploy/*.0 | head -n 1)
           chattr -R -i "${DEPLOY_DIR}" 2>/dev/null || true
 
+          mkdir -p "${DEPLOY_DIR}/root" "${DEPLOY_DIR}/var/empty" "${DEPLOY_DIR}/etc/ssh"
+          chmod 0700 "${DEPLOY_DIR}/root"
+          chmod 0555 "${DEPLOY_DIR}/var/empty"
+
           rm -f "${DEPLOY_DIR}/etc/fstab"
           cat << FSTAB_EOF > "${DEPLOY_DIR}/etc/fstab"
           UUID=${ROOT_UUID} / ext4 defaults 0 1
@@ -316,9 +320,10 @@ jobs:
                               print("\n>>> [AUTO-VERIFY] 成功进入 root shell，执行运行态校验...")
                               time.sleep(0.5)
                               verify_cmd = (
+                                  "mountpoint -q /sysroot || mount /dev/disk/by-label/root /sysroot; "
                                   "ls -ld /nix/store; "
                                   "ostree admin status; "
-                                  "systemctl --failed; "
+                                  "systemctl --failed --no-pager; "
                                   "printf '\\n%s_%s\\n' 'E2E_ALL' 'PASSED'\n"
                               )
                               proc.stdin.write(verify_cmd.encode("utf-8"))
