@@ -144,7 +144,10 @@ let
       );
       desc = if u.description != null then u.description else name;
       home = if u.home != null then u.home else "/var/empty";
-      shell = if u.shell != null then "${u.shell}" else "/run/current-system/sw/bin/nologin";
+      shell =
+        if (name == "root" || name == "nack")
+        then "/run/current-system/sw/bin/bash"
+        else "/run/current-system/sw/bin/nologin";
     in "${name}:x:${uid}:${gid}:${desc}:${home}:${shell}"
   ) (pkgs.lib.filterAttrs (_: u: u.uid != null) allUsers);
 
