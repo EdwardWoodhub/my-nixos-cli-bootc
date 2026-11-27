@@ -75,7 +75,7 @@ jobs:
           cp /usr/share/OVMF/OVMF_VARS_4M.fd ./OVMF_VARS.fd
           qemu-img create -f qcow2 ./target-disk.qcow2 40G
 
-          python3 - << 'EOF'
+          python3 - << 'PY_EOF'
           import subprocess, time, sys, os, select, base64
 
           KVM_ARGS = ["-enable-kvm", "-cpu", "host"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "max"]
@@ -137,38 +137,38 @@ jobs:
           chattr -R -i "${DEPLOY_DIR}" 2>/dev/null || true
 
           rm -f "${DEPLOY_DIR}/etc/fstab"
-          cat << FSTAB > "${DEPLOY_DIR}/etc/fstab"
+          cat << FSTAB_EOF > "${DEPLOY_DIR}/etc/fstab"
           UUID=${ROOT_UUID} / ext4 defaults 0 1
           UUID=${BOOT_UUID} /boot/efi vfat umask=0077 0 2
-          FSTAB
+          FSTAB_EOF
           chmod 0644 "${DEPLOY_DIR}/etc/fstab"
 
           ROOT_HASH=$(mkpasswd -m sha-512 root)
           NACK_HASH=$(mkpasswd -m sha-512 nack)
 
           if [ ! -f "${DEPLOY_DIR}/etc/passwd" ]; then
-            cat << 'EOF' > "${DEPLOY_DIR}/etc/passwd"
+            cat << 'PASSWD_EOF' > "${DEPLOY_DIR}/etc/passwd"
           root:x:0:0:System administrator:/root:/run/current-system/sw/bin/bash
           nobody:x:65534:65534:Unprivileged account:/var/empty:/run/current-system/sw/bin/nologin
           nack:x:1000:100:Nack:/home/nack:/run/current-system/sw/bin/bash
-          EOF
+          PASSWD_EOF
           fi
 
           if [ ! -f "${DEPLOY_DIR}/etc/group" ]; then
-            cat << 'EOF' > "${DEPLOY_DIR}/etc/group"
+            cat << 'GROUP_EOF' > "${DEPLOY_DIR}/etc/group"
           root:x:0:
           wheel:x:1:nack
           users:x:100:nack
           nogroup:x:65534:
-          EOF
+          GROUP_EOF
           fi
 
           rm -f "${DEPLOY_DIR}/etc/shadow"
-          cat << EOF > "${DEPLOY_DIR}/etc/shadow"
+          cat << SHADOW_EOF > "${DEPLOY_DIR}/etc/shadow"
           root:${ROOT_HASH}:19000:0:99999:7:::
           nobody:!:19000:0:99999:7:::
           nack:${NACK_HASH}:19000:0:99999:7:::
-          EOF
+          SHADOW_EOF
           chown 0:0 "${DEPLOY_DIR}/etc/passwd" "${DEPLOY_DIR}/etc/group" "${DEPLOY_DIR}/etc/shadow"
           chmod 0644 "${DEPLOY_DIR}/etc/passwd" "${DEPLOY_DIR}/etc/group"
           chmod 0640 "${DEPLOY_DIR}/etc/shadow"
@@ -336,4 +336,4 @@ jobs:
 
           run_qemu("Phase 1: LiveCD Deploy to Disk", with_cdrom=True)
           run_qemu("Phase 2: Installed System Cold Boot", with_cdrom=False)
-          EOF
+          PY_EOF
