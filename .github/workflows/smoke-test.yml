@@ -143,16 +143,34 @@ jobs:
           FSTAB
           chmod 0644 "${DEPLOY_DIR}/etc/fstab"
 
-          ROOT_HASH=$(mkpasswd -m sha-512 root 2>/dev/null || python3 -c 'import crypt; print(crypt.crypt("root", crypt.mksalt(crypt.METHOD_SHA512)))')
-          NACK_HASH=$(mkpasswd -m sha-512 nack 2>/dev/null || python3 -c 'import crypt; print(crypt.crypt("nack", crypt.mksalt(crypt.METHOD_SHA512)))')
-          if [ -L "${DEPLOY_DIR}/etc/shadow" ]; then
-            cp -L "${DEPLOY_DIR}/etc/shadow" "${DEPLOY_DIR}/etc/shadow.new"
-            rm -f "${DEPLOY_DIR}/etc/shadow"
-            mv "${DEPLOY_DIR}/etc/shadow.new" "${DEPLOY_DIR}/etc/shadow"
+          ROOT_HASH=$(mkpasswd -m sha-512 root)
+          NACK_HASH=$(mkpasswd -m sha-512 nack)
+
+          if [ ! -f "${DEPLOY_DIR}/etc/passwd" ]; then
+            cat << 'EOF' > "${DEPLOY_DIR}/etc/passwd"
+          root:x:0:0:System administrator:/root:/run/current-system/sw/bin/bash
+          nobody:x:65534:65534:Unprivileged account:/var/empty:/run/current-system/sw/bin/nologin
+          nack:x:1000:100:Nack:/home/nack:/run/current-system/sw/bin/bash
+          EOF
           fi
-          sed -i "s|^root:[^:]*:|root:${ROOT_HASH}:|" "${DEPLOY_DIR}/etc/shadow"
-          sed -i "s|^nack:[^:]*:|nack:${NACK_HASH}:|" "${DEPLOY_DIR}/etc/shadow"
-          chown 0:0 "${DEPLOY_DIR}/etc/shadow"
+
+          if [ ! -f "${DEPLOY_DIR}/etc/group" ]; then
+            cat << 'EOF' > "${DEPLOY_DIR}/etc/group"
+          root:x:0:
+          wheel:x:1:nack
+          users:x:100:nack
+          nogroup:x:65534:
+          EOF
+          fi
+
+          rm -f "${DEPLOY_DIR}/etc/shadow"
+          cat << EOF > "${DEPLOY_DIR}/etc/shadow"
+          root:${ROOT_HASH}:19000:0:99999:7:::
+          nobody:!:19000:0:99999:7:::
+          nack:${NACK_HASH}:19000:0:99999:7:::
+          EOF
+          chown 0:0 "${DEPLOY_DIR}/etc/passwd" "${DEPLOY_DIR}/etc/group" "${DEPLOY_DIR}/etc/shadow"
+          chmod 0644 "${DEPLOY_DIR}/etc/passwd" "${DEPLOY_DIR}/etc/group"
           chmod 0640 "${DEPLOY_DIR}/etc/shadow"
 
           chattr +i "${DEPLOY_DIR}" 2>/dev/null || true
