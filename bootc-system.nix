@@ -38,7 +38,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH（生成干净的 sshd_config 与主机密钥，确保 sshd.service 稳定启动）
+  # 6. 配置 OpenSSH（使用独立生成的 /run/sshd_config 与主机密钥，确保 sshd.service 零依赖稳定启动）
   services.openssh = {
     enable = true;
     settings = {
@@ -53,19 +53,53 @@
       chmod 0755 /etc/ssh
       chmod 0555 /var/empty
       ${pkgs.openssh}/bin/ssh-keygen -A
+      cat > /run/sshd_config << 'EOF'
+      Port 22
+      HostKey /etc/ssh/ssh_host_ed25519_key
+      HostKey /etc/ssh/ssh_host_rsa_key
+      PermitRootLogin yes
+      PasswordAuthentication yes
+      UsePAM yes
+      PidFile /run/sshd.pid
+      Subsystem sftp ${pkgs.openssh}/libexec/sftp-server
+      EOF
     '';
   };
   systemd.services."sshd" = {
-    serviceConfig.ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -o PermitRootLogin=yes -o PasswordAuthentication=yes -o UsePAM=yes -o PidFile=/run/sshd.pid";
+    serviceConfig.ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -f /run/sshd_config";
   };
 
-  # 7. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
+  # 7. 确保 /boot/loader 与 /boot/ostree 路径在运行时始终对 ostree admin / bootc 可见
+  systemd.services."ostree-boot-link" = {
+    description = "Ensure /boot/loader and /boot/ostree are visible for ostree/bootc";
+    wantedBy = [ "local-fs.target" "multi-user.target" ];
+    after = [ "local-fs.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      mkdir -p /boot
+      if [ ! -e /boot/loader ] && [ -d /sysroot/boot/loader ]; then
+        ln -s /sysroot/boot/loader /boot/loader
+      elif [ ! -e /boot/loader ] && [ -d /boot/efi/loader ]; then
+        ln -s /boot/efi/loader /boot/loader
+      fi
+      if [ ! -e /boot/ostree ] && [ -d /sysroot/boot/ostree ]; then
+        ln -s /sysroot/boot/ostree /boot/ostree
+      elif [ ! -e /boot/ostree ] && [ -d /boot/efi/ostree ]; then
+        ln -s /boot/efi/ostree /boot/ostree
+      fi
+    '';
+  };
+
+  # 8. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
   systemd.defaultUnit = lib.mkForce "multi-user.target";
   systemd.services."display-manager".enable = lib.mkForce false;
   boot.initrd.kernelModules = [ "vmwgfx" ];
   services.xserver.videoDrivers = [ "vmware" "modesetting" ];
 
-  # 8. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target
+  # 9. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target
   systemd.services."getty@tty1" = {
     enable = true;
     wantedBy = [ "multi-user.target" ];
@@ -80,7 +114,7 @@
     serviceConfig.TTYReset = "no";
   };
 
-  # 9. 初始化标准 OSTree /var/* 持久化目录（对应 /home、/root、/opt、/srv、/mnt、/usr/local 软链接）
+  # 10. 初始化标准 OSTree /var/* 持久化目录（对应 /home、/root、/opt、/srv、/mnt、/usr/local 软链接）
   systemd.automounts = lib.mkForce [];
   systemd.tmpfiles.rules = [
     "d /var/home 0755 root root -"
@@ -99,7 +133,7 @@
     "d /var/lib/AccountsService/icons 0775 root root -"
   ];
 
-  # 10. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
+  # 11. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
   environment.systemPackages = with pkgs; [
     bootc
     ostree
@@ -108,7 +142,7 @@
     dosfstools
   ];
 
-  # 11. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
+  # 12. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
   environment.variables = {
     PATH = lib.mkForce "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
   };
