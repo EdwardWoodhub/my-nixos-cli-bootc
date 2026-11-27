@@ -9,7 +9,7 @@
   boot.loader.grub.enable = lib.mkForce false;
   boot.loader.systemd-boot.enable = lib.mkForce false;
 
-  # 2. 配置根文件系统与 /sysroot（ostree admin / bootc 依赖 /sysroot/ostree/repo）
+  # 2. 配置根文件系统与 /sysroot（使 /ostree -> /sysroot/ostree 生效，支持 bootc / ostree admin 原地操作）
   fileSystems."/" = lib.mkForce {
     device = "none";
     fsType = "tmpfs";
@@ -44,16 +44,23 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH（使用默认 /etc/ssh 路径，并在生成密钥前确保目录存在）
+  # 6. 配置 OpenSSH 并使用 ssh-keygen -A 确保主机密钥在 /etc/ssh 正常生成
   services.openssh = {
     enable = true;
-    settings.PermitRootLogin = lib.mkForce "yes";
+    settings = {
+      PermitRootLogin = lib.mkForce "yes";
+      PasswordAuthentication = lib.mkForce true;
+      UsePAM = lib.mkForce true;
+    };
   };
-  systemd.services."sshd-keygen".preStart = lib.mkBefore ''
-    mkdir -p /etc/ssh /var/empty
-    chmod 0755 /etc/ssh
-    chmod 0555 /var/empty
-  '';
+  systemd.services."sshd-keygen" = {
+    preStart = lib.mkBefore ''
+      mkdir -p /etc/ssh /var/empty
+      chmod 0755 /etc/ssh
+      chmod 0555 /var/empty
+      ${pkgs.openssh}/bin/ssh-keygen -A
+    '';
+  };
 
   # 7. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
   systemd.defaultUnit = lib.mkForce "multi-user.target";
@@ -76,10 +83,17 @@
     serviceConfig.TTYReset = "no";
   };
 
-  # 9. 清空冲突的自动挂载单元，并预创建 /root、/var/empty、SSH 密钥目录与 AccountsService 目录
+  # 9. 初始化标准 OSTree /var/* 持久化目录（对应 /home、/root、/opt、/srv、/mnt、/usr/local 软链接）
   systemd.automounts = lib.mkForce [];
   systemd.tmpfiles.rules = [
-    "d /root 0700 root root -"
+    "d /var/home 0755 root root -"
+    "d /var/home/nack 0700 nack users -"
+    "d /var/roothome 0700 root root -"
+    "d /var/opt 0755 root root -"
+    "d /var/srv 0755 root root -"
+    "d /var/mnt 0755 root root -"
+    "d /var/mnt/hgfs 0755 root root -"
+    "d /var/usrlocal 0755 root root -"
     "d /var/empty 0555 root root -"
     "d /etc/ssh 0755 root root -"
     "d /mount/hgfs 0755 root root -"
