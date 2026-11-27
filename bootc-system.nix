@@ -9,17 +9,11 @@
   boot.loader.grub.enable = lib.mkForce false;
   boot.loader.systemd-boot.enable = lib.mkForce false;
 
-  # 2. 配置根文件系统与 /sysroot（使 /ostree -> /sysroot/ostree 生效，支持 bootc / ostree admin 原地操作）
+  # 2. 清空硬编码根分区（/sysroot 与 /boot 的 bind-mount 由部署 fstab 接管，避免 initrd-fstab 重复生成 sysroot.mount）
   fileSystems."/" = lib.mkForce {
     device = "none";
     fsType = "tmpfs";
     neededForBoot = false;
-  };
-  fileSystems."/sysroot" = lib.mkForce {
-    device = "/dev/disk/by-label/root";
-    fsType = "ext4";
-    neededForBoot = false;
-    options = [ "defaults" "nofail" ];
   };
   fileSystems."/mount/hgfs" = lib.mkForce {
     device = "none";
@@ -35,16 +29,15 @@
   # 4. 彻底关闭本地 Nix 守护进程与数据库管理（本地无 nix store 状态维护）
   nix.enable = lib.mkForce false;
 
-  # 5. 禁用在 ostree 只读根下易报错的冗余后台服务
+  # 5. 禁用在 ostree 只读根下易报错的冗余后台服务（保留默认 NSS 模块以支持 PAM/SSH 完整解析）
   services.nscd.enable = lib.mkForce false;
-  system.nssModules = lib.mkForce [];
   systemd.oomd.enable = lib.mkForce false;
   networking.wireless.enable = lib.mkForce false;
   systemd.services."wpa_supplicant".enable = lib.mkForce false;
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置 OpenSSH 并重写 sshd-keygen 脚本确保主机密钥在 /etc/ssh 正常生成
+  # 6. 配置 OpenSSH（生成干净的 sshd_config 与主机密钥，确保 sshd.service 稳定启动）
   services.openssh = {
     enable = true;
     settings = {
@@ -60,6 +53,9 @@
       chmod 0555 /var/empty
       ${pkgs.openssh}/bin/ssh-keygen -A
     '';
+  };
+  systemd.services."sshd" = {
+    serviceConfig.ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -o PermitRootLogin=yes -o PasswordAuthentication=yes -o UsePAM=yes -o PidFile=/run/sshd.pid";
   };
 
   # 7. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
