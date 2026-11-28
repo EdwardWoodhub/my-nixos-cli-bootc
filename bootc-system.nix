@@ -43,7 +43,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置常驻 OpenSSH 守护进程（确保在 local-fs 与 tmpfiles 就绪后生成密钥，再由 multi-user.target 拉起 sshd）
+  # 6. 配置常驻 OpenSSH 守护进程（绕开原生 sshd-keygen 的 ProtectSystem 沙盒限制）
   services.openssh = {
     enable = true;
     startWhenNeeded = false;
@@ -53,16 +53,17 @@
       UsePAM = lib.mkForce true;
     };
   };
-  systemd.services."sshd-keygen" = {
+  systemd.services."sshd-keygen".enable = lib.mkForce false;
+
+  systemd.services."bootc-sshd-setup" = {
+    description = "Generate SSH host keys and runtime config for bootc";
     wantedBy = [ "multi-user.target" ];
-    after = [ "local-fs.target" "systemd-tmpfiles-setup.service" ];
-    path = [ pkgs.coreutils pkgs.openssh ];
+    after = [ "local-fs.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStartPre = lib.mkForce "";
     };
-    script = lib.mkForce ''
+    script = ''
       ${pkgs.coreutils}/bin/mkdir -p /etc/ssh /var/empty /run
       ${pkgs.coreutils}/bin/chmod 0755 /etc/ssh
       ${pkgs.coreutils}/bin/chmod 0555 /var/empty
@@ -79,23 +80,24 @@
         > /run/sshd_config
     '';
   };
+
   systemd.services."sshd" = {
     enable = true;
     wantedBy = [ "multi-user.target" ];
-    after = [ "sshd-keygen.service" "network.target" ];
-    requires = [ "sshd-keygen.service" ];
+    after = [ "bootc-sshd-setup.service" "network.target" ];
+    requires = [ "bootc-sshd-setup.service" ];
     serviceConfig = {
       ExecStartPre = lib.mkForce "${pkgs.openssh}/bin/sshd -t -f /run/sshd_config";
       ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -f /run/sshd_config";
     };
   };
 
-  # 7. 将整个 /sysroot/boot 绑定挂载到 /boot，并确保 update-grub-bls 在挂载完成后再运行
+  # 7. 在 local-fs.target 之前绑定挂载 /sysroot/boot -> /boot，确保 update-grub-bls 启动时目录已就绪
   systemd.services."ostree-boot-link" = {
     description = "Bind-mount /sysroot/boot to /boot for ostree/bootc";
-    wantedBy = [ "local-fs.target" "multi-user.target" ];
-    after = [ "local-fs.target" ];
-    before = [ "update-grub-bls.service" ];
+    unitConfig.DefaultDependencies = false;
+    wantedBy = [ "local-fs.target" ];
+    before = [ "local-fs.target" "update-grub-bls.service" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -111,7 +113,7 @@
     '';
   };
   systemd.services."update-grub-bls" = {
-    after = [ "ostree-boot-link.service" ];
+    after = [ "ostree-boot-link.service" "local-fs.target" ];
     requires = [ "ostree-boot-link.service" ];
   };
 
