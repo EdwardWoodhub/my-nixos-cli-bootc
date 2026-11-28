@@ -73,55 +73,6 @@ let
         gptfdisk
         util-linux
       ];
-
-      # 动态将 /boot/loader/entries/*.conf 转换为原生 GRUB 菜单（兼容 BIOS + UEFI）
-      systemd.services.update-grub-bls = {
-        description = "Generate GRUB menuentries from OSTree BLS entries";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "local-fs.target" "ostree-finalize-staged.service" ];
-        before = [ "shutdown.target" ];
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          ExecStart = pkgs.writeShellScript "update-grub-bls" ''
-            set -euo pipefail
-            [ -d /boot/loader/entries ] || exit 0
-            ${pkgs.coreutils}/bin/mkdir -p /boot/grub
-            TMP_CFG=$(${pkgs.coreutils}/bin/mktemp /boot/grub/grub.cfg.XXXXXX)
-
-            ${pkgs.coreutils}/bin/cat > "$TMP_CFG" << 'EOF'
-            insmod part_gpt
-            insmod part_msdos
-            insmod ext2
-            insmod fat
-            insmod search_fs_label
-            insmod search_fs_uuid
-            set timeout=3
-            search --no-floppy --label --set=root root
-            EOF
-
-            for entry in $(${pkgs.coreutils}/bin/ls -1r /boot/loader/entries/*.conf 2>/dev/null || true); do
-              [ -f "$entry" ] || continue
-              TITLE=$(${pkgs.gnugrep}/bin/grep -m1 '^title ' "$entry" | ${pkgs.gnused}/bin/sed 's/^title //')
-              LINUX=$(${pkgs.gnugrep}/bin/grep -m1 '^linux ' "$entry" | ${pkgs.gnused}/bin/sed 's/^linux //')
-              INITRD=$(${pkgs.gnugrep}/bin/grep -m1 '^initrd ' "$entry" | ${pkgs.gnused}/bin/sed 's/^initrd //')
-              OPTIONS=$(${pkgs.gnugrep}/bin/grep -m1 '^options ' "$entry" | ${pkgs.gnused}/bin/sed 's/^options //')
-              if [ -n "$LINUX" ] && [ -n "$OPTIONS" ]; then
-                {
-                  echo ""
-                  echo "menuentry \"$TITLE\" {"
-                  echo "  linux $LINUX $OPTIONS"
-                  [ -n "$INITRD" ] && echo "  initrd $INITRD"
-                  echo "}"
-                } >> "$TMP_CFG"
-              fi
-            done
-
-            ${pkgs.coreutils}/bin/mv "$TMP_CFG" /boot/grub/grub.cfg
-            ${pkgs.coreutils}/bin/sync
-          '';
-        };
-      };
     };
   };
 
@@ -250,7 +201,7 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.linux-firmware
   ];
 
-  # 构建标准 OSTree/bootc 目录拓扑并写入全量 NixOS 系统账号
+  # 构建标准 OSTree/bootc 目录拓扑并写入全量 NixOS 系统账号（补齐 /bin/sh 软链接）
   extraCommands = ''
     cp -a ${bootcPayload}/usr ./
     chmod -R u+w usr
@@ -272,7 +223,7 @@ pkgs.dockerTools.buildLayeredImage {
     sed -i "s|^root:[^:]*:|root:''${ROOT_HASH}:|" usr/etc/shadow
     sed -i "s|^nack:[^:]*:|nack:''${NACK_HASH}:|" usr/etc/shadow
 
-    # 3. 构建标准 OSTree/bootc FHS 软链接拓扑（补齐 /bin/sh，确保标准 POSIX/systemd 脚本直接可执行）
+    # 3. 构建标准 OSTree/bootc FHS 软链接拓扑（所有跨版本持久化状态统一收敛到 /var）
     mkdir -p bin usr/bin var var/tmp sysroot boot boot/efi dev proc sys run tmp
     rm -rf home root opt srv mnt ostree usr/local var/run
     ln -s var/home home
