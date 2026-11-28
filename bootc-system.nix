@@ -43,7 +43,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置常驻 OpenSSH 守护进程（直接用 pkgs.writeShellScript 锁定 /nix/store bash 解释器，密钥与配置生成在 /run/ssh）
+  # 6. 配置常驻 OpenSSH 守护进程（不触碰 chattr +i 锁定的 /var/empty，仅操作 /run/ssh）
   services.openssh = {
     enable = true;
     startWhenNeeded = false;
@@ -62,11 +62,10 @@
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStart = pkgs.writeShellScript "bootc-sshd-setup" ''
+      ExecStart = "${pkgs.writeShellScript "bootc-sshd-setup" ''
         set -euo pipefail
-        ${pkgs.coreutils}/bin/mkdir -p /run/ssh /var/empty
+        ${pkgs.coreutils}/bin/mkdir -p /run/ssh
         ${pkgs.coreutils}/bin/chmod 0700 /run/ssh
-        ${pkgs.coreutils}/bin/chmod 0555 /var/empty
         ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /run/ssh/ssh_host_ed25519_key -N "" -q
         ${pkgs.openssh}/bin/ssh-keygen -t rsa -b 2048 -f /run/ssh/ssh_host_rsa_key -N "" -q
         ${pkgs.coreutils}/bin/printf '%s\n' \
@@ -79,7 +78,7 @@
           'PidFile /run/sshd.pid' \
           'Subsystem sftp ${pkgs.openssh}/libexec/sftp-server' \
           > /run/ssh/sshd_config
-      '';
+      ''}";
     };
   };
 
@@ -94,34 +93,41 @@
     };
   };
 
-  # 7. 在 local-fs.target 前绑定挂载 /sysroot/boot -> /boot，并确保 update-grub-bls 在 /boot 就绪后执行
+  # 7. 绑定 /boot 并重新挂载为可写（解除 sysroot readonly 继承），再同步 OSTree BLS 条目到 GRUB 配置
   systemd.services."ostree-boot-link" = {
-    description = "Bind-mount /sysroot/boot to /boot for ostree/bootc";
+    description = "Bind-mount /sysroot/boot to /boot as rw for ostree/bootc";
     unitConfig.DefaultDependencies = false;
     wantedBy = [ "local-fs.target" ];
     before = [ "local-fs.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStart = pkgs.writeShellScript "ostree-boot-link" ''
+      ExecStart = "${pkgs.writeShellScript "ostree-boot-link" ''
         ${pkgs.coreutils}/bin/mkdir -p /boot
         if [ -d /sysroot/boot/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot; then
           ${pkgs.util-linux}/bin/mount --bind /sysroot/boot /boot
-          if ${pkgs.util-linux}/bin/mountpoint -q /sysroot/boot/efi && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/efi; then
-            ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/efi /boot/efi
-          fi
         fi
-      '';
+        if ${pkgs.util-linux}/bin/mountpoint -q /boot; then
+          ${pkgs.util-linux}/bin/mount -o remount,rw /boot || true
+        fi
+        if ${pkgs.util-linux}/bin/mountpoint -q /sysroot/boot/efi && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/efi; then
+          ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/efi /boot/efi
+        fi
+      ''}";
     };
   };
 
   systemd.services."update-grub-bls" = {
-    wantedBy = lib.mkForce [ "multi-user.target" ];
-    after = lib.mkForce [ "local-fs.target" "ostree-boot-link.service" ];
+    description = "Generate GRUB menuentries from OSTree BLS entries";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "local-fs.target" "ostree-boot-link.service" ];
     serviceConfig = {
-      ExecStart = lib.mkForce (pkgs.writeShellScript "update-grub-bls" ''
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.writeShellScript "update-grub-bls" ''
         set -euo pipefail
         [ -d /boot/loader/entries ] || exit 0
+        ${pkgs.util-linux}/bin/mount -o remount,rw /boot 2>/dev/null || true
         ${pkgs.coreutils}/bin/mkdir -p /boot/grub
         TMP_CFG=$(${pkgs.coreutils}/bin/mktemp /boot/grub/grub.cfg.XXXXXX)
 
@@ -155,7 +161,7 @@
 
         ${pkgs.coreutils}/bin/mv "$TMP_CFG" /boot/grub/grub.cfg
         ${pkgs.coreutils}/bin/sync
-      '');
+      ''}";
     };
   };
 
