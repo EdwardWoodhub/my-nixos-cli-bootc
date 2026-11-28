@@ -43,7 +43,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置常驻 OpenSSH 守护进程（密钥与配置全量生成在 /run/ssh 下，彻底避开只读根或 /etc 权限问题）
+  # 6. 配置常驻 OpenSSH 守护进程（直接用 pkgs.writeShellScript 锁定 /nix/store bash 解释器，密钥与配置生成在 /run/ssh）
   services.openssh = {
     enable = true;
     startWhenNeeded = false;
@@ -62,25 +62,25 @@
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      ExecStart = pkgs.writeShellScript "bootc-sshd-setup" ''
+        set -euo pipefail
+        ${pkgs.coreutils}/bin/mkdir -p /run/ssh /var/empty
+        ${pkgs.coreutils}/bin/chmod 0700 /run/ssh
+        ${pkgs.coreutils}/bin/chmod 0555 /var/empty
+        ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /run/ssh/ssh_host_ed25519_key -N "" -q
+        ${pkgs.openssh}/bin/ssh-keygen -t rsa -b 2048 -f /run/ssh/ssh_host_rsa_key -N "" -q
+        ${pkgs.coreutils}/bin/printf '%s\n' \
+          'Port 22' \
+          'HostKey /run/ssh/ssh_host_ed25519_key' \
+          'HostKey /run/ssh/ssh_host_rsa_key' \
+          'PermitRootLogin yes' \
+          'PasswordAuthentication yes' \
+          'UsePAM yes' \
+          'PidFile /run/sshd.pid' \
+          'Subsystem sftp ${pkgs.openssh}/libexec/sftp-server' \
+          > /run/ssh/sshd_config
+      '';
     };
-    script = ''
-      set -euo pipefail
-      ${pkgs.coreutils}/bin/mkdir -p /run/ssh /var/empty
-      ${pkgs.coreutils}/bin/chmod 0700 /run/ssh
-      ${pkgs.coreutils}/bin/chmod 0555 /var/empty
-      ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /run/ssh/ssh_host_ed25519_key -N "" -q
-      ${pkgs.openssh}/bin/ssh-keygen -t rsa -b 2048 -f /run/ssh/ssh_host_rsa_key -N "" -q
-      ${pkgs.coreutils}/bin/printf '%s\n' \
-        'Port 22' \
-        'HostKey /run/ssh/ssh_host_ed25519_key' \
-        'HostKey /run/ssh/ssh_host_rsa_key' \
-        'PermitRootLogin yes' \
-        'PasswordAuthentication yes' \
-        'UsePAM yes' \
-        'PidFile /run/sshd.pid' \
-        'Subsystem sftp ${pkgs.openssh}/libexec/sftp-server' \
-        > /run/ssh/sshd_config
-    '';
   };
 
   systemd.services."sshd" = {
@@ -94,7 +94,7 @@
     };
   };
 
-  # 7. 延迟 update-grub-bls 到 multi-user.target 且确保 /boot 已就绪
+  # 7. 在 local-fs.target 前绑定挂载 /sysroot/boot -> /boot，并确保 update-grub-bls 在 /boot 就绪后执行
   systemd.services."ostree-boot-link" = {
     description = "Bind-mount /sysroot/boot to /boot for ostree/bootc";
     unitConfig.DefaultDependencies = false;
@@ -103,21 +103,60 @@
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-    };
-    script = ''
-      ${pkgs.coreutils}/bin/mkdir -p /boot
-      if [ -d /sysroot/boot/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot; then
-        ${pkgs.util-linux}/bin/mount --bind /sysroot/boot /boot
-        if ${pkgs.util-linux}/bin/mountpoint -q /sysroot/boot/efi && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/efi; then
-          ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/efi /boot/efi
+      ExecStart = pkgs.writeShellScript "ostree-boot-link" ''
+        ${pkgs.coreutils}/bin/mkdir -p /boot
+        if [ -d /sysroot/boot/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot; then
+          ${pkgs.util-linux}/bin/mount --bind /sysroot/boot /boot
+          if ${pkgs.util-linux}/bin/mountpoint -q /sysroot/boot/efi && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/efi; then
+            ${pkgs.util-linux}/bin/mount --bind /sysroot/boot/efi /boot/efi
+          fi
         fi
-      fi
-    '';
+      '';
+    };
   };
 
   systemd.services."update-grub-bls" = {
     wantedBy = lib.mkForce [ "multi-user.target" ];
     after = lib.mkForce [ "local-fs.target" "ostree-boot-link.service" ];
+    serviceConfig = {
+      ExecStart = lib.mkForce (pkgs.writeShellScript "update-grub-bls" ''
+        set -euo pipefail
+        [ -d /boot/loader/entries ] || exit 0
+        ${pkgs.coreutils}/bin/mkdir -p /boot/grub
+        TMP_CFG=$(${pkgs.coreutils}/bin/mktemp /boot/grub/grub.cfg.XXXXXX)
+
+        ${pkgs.coreutils}/bin/cat > "$TMP_CFG" << 'EOF'
+        insmod part_gpt
+        insmod part_msdos
+        insmod ext2
+        insmod fat
+        insmod search_fs_label
+        insmod search_fs_uuid
+        set timeout=3
+        search --no-floppy --label --set=root root
+        EOF
+
+        for entry in $(${pkgs.coreutils}/bin/ls -1r /boot/loader/entries/*.conf 2>/dev/null || true); do
+          [ -f "$entry" ] || continue
+          TITLE=$(${pkgs.gnugrep}/bin/grep -m1 '^title ' "$entry" | ${pkgs.gnused}/bin/sed 's/^title //')
+          LINUX=$(${pkgs.gnugrep}/bin/grep -m1 '^linux ' "$entry" | ${pkgs.gnused}/bin/sed 's/^linux //')
+          INITRD=$(${pkgs.gnugrep}/bin/grep -m1 '^initrd ' "$entry" | ${pkgs.gnused}/bin/sed 's/^initrd //')
+          OPTIONS=$(${pkgs.gnugrep}/bin/grep -m1 '^options ' "$entry" | ${pkgs.gnused}/bin/sed 's/^options //')
+          if [ -n "$LINUX" ] && [ -n "$OPTIONS" ]; then
+            {
+              echo ""
+              echo "menuentry \"$TITLE\" {"
+              echo "  linux $LINUX $OPTIONS"
+              [ -n "$INITRD" ] && echo "  initrd $INITRD"
+              echo "}"
+            } >> "$TMP_CFG"
+          fi
+        done
+
+        ${pkgs.coreutils}/bin/mv "$TMP_CFG" /boot/grub/grub.cfg
+        ${pkgs.coreutils}/bin/sync
+      '');
+    };
   };
 
   # 8. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
