@@ -43,7 +43,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置常驻 OpenSSH 守护进程（关闭 socket 激活，直接由 multi-user.target 拉起 sshd.service）
+  # 6. 配置常驻 OpenSSH 守护进程（确保在 local-fs 与 tmpfiles 就绪后生成密钥，再由 multi-user.target 拉起 sshd）
   services.openssh = {
     enable = true;
     startWhenNeeded = false;
@@ -55,12 +55,19 @@
   };
   systemd.services."sshd-keygen" = {
     wantedBy = [ "multi-user.target" ];
+    after = [ "local-fs.target" "systemd-tmpfiles-setup.service" ];
+    path = [ pkgs.coreutils pkgs.openssh ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStartPre = lib.mkForce "";
+    };
     script = lib.mkForce ''
-      mkdir -p /etc/ssh /var/empty /run
-      chmod 0755 /etc/ssh
-      chmod 0555 /var/empty
+      ${pkgs.coreutils}/bin/mkdir -p /etc/ssh /var/empty /run
+      ${pkgs.coreutils}/bin/chmod 0755 /etc/ssh
+      ${pkgs.coreutils}/bin/chmod 0555 /var/empty
       ${pkgs.openssh}/bin/ssh-keygen -A
-      printf '%s\n' \
+      ${pkgs.coreutils}/bin/printf '%s\n' \
         'Port 22' \
         'HostKey /etc/ssh/ssh_host_ed25519_key' \
         'HostKey /etc/ssh/ssh_host_rsa_key' \
@@ -83,17 +90,18 @@
     };
   };
 
-  # 7. 将整个 /sysroot/boot 绑定挂载到 /boot，保留 /boot/loader -> loader.1 的原生相对软链接结构
+  # 7. 将整个 /sysroot/boot 绑定挂载到 /boot，并确保 update-grub-bls 在挂载完成后再运行
   systemd.services."ostree-boot-link" = {
     description = "Bind-mount /sysroot/boot to /boot for ostree/bootc";
     wantedBy = [ "local-fs.target" "multi-user.target" ];
     after = [ "local-fs.target" ];
+    before = [ "update-grub-bls.service" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
     };
     script = ''
-      mkdir -p /boot
+      ${pkgs.coreutils}/bin/mkdir -p /boot
       if [ -d /sysroot/boot/loader ] && ! ${pkgs.util-linux}/bin/mountpoint -q /boot; then
         ${pkgs.util-linux}/bin/mount --bind /sysroot/boot /boot
         if ${pkgs.util-linux}/bin/mountpoint -q /sysroot/boot/efi && ! ${pkgs.util-linux}/bin/mountpoint -q /boot/efi; then
@@ -101,6 +109,10 @@
         fi
       fi
     '';
+  };
+  systemd.services."update-grub-bls" = {
+    after = [ "ostree-boot-link.service" ];
+    requires = [ "ostree-boot-link.service" ];
   };
 
   # 8. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
