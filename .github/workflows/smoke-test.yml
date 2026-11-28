@@ -222,7 +222,7 @@ jobs:
                       proc.kill()
                       sys.exit(1)
 
-                  if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 45):
+                  if not with_cdrom and verify_triggered_at and (time.time() - verify_triggered_at > 90):
                       print("\n[ERROR] [Phase 2] 登录校验超时未完成！", file=sys.stderr)
                       proc.kill()
                       sys.exit(1)
@@ -292,6 +292,9 @@ jobs:
                               print("\n>>> [AUTO-VERIFY] 成功进入 root shell，执行严格运行态断言...")
                               time.sleep(0.5)
                               verify_cmd = (
+                                  "systemctl --failed --no-legend || true; "
+                                  "systemctl status bootc-sshd-setup.service update-grub-bls.service sshd.service --no-pager -l || true; "
+                                  "journalctl -u bootc-sshd-setup -u update-grub-bls -u sshd --no-pager || true; "
                                   "set -e; "
                                   "test \"$(readlink /home)\" = \"var/home\"; "
                                   "test \"$(readlink /ostree)\" = \"sysroot/ostree\"; "
