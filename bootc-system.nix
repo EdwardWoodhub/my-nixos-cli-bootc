@@ -119,12 +119,12 @@
 
   systemd.services."update-grub-bls" = {
     description = "Generate GRUB menuentries from OSTree BLS entries";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "local-fs.target" "ostree-boot-link.service" ];
+    wantedBy = lib.mkForce [ "multi-user.target" ];
+    after = lib.mkForce [ "local-fs.target" "ostree-boot-link.service" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStart = "${pkgs.writeShellScript "update-grub-bls" ''
+      ExecStart = lib.mkForce "${pkgs.writeShellScript "update-grub-bls" ''
         set -euo pipefail
         [ -d /boot/loader/entries ] || exit 0
         ${pkgs.util-linux}/bin/mount -o remount,rw /boot 2>/dev/null || true
