@@ -43,7 +43,7 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置常驻 OpenSSH 守护进程（绕开原生 sshd-keygen 的 ProtectSystem 沙盒限制）
+  # 6. 配置常驻 OpenSSH 守护进程（密钥与配置全量生成在 /run/ssh 下，彻底避开只读根或 /etc 权限问题）
   services.openssh = {
     enable = true;
     startWhenNeeded = false;
@@ -56,7 +56,7 @@
   systemd.services."sshd-keygen".enable = lib.mkForce false;
 
   systemd.services."bootc-sshd-setup" = {
-    description = "Generate SSH host keys and runtime config for bootc";
+    description = "Generate SSH host keys and runtime config in /run/ssh";
     wantedBy = [ "multi-user.target" ];
     after = [ "local-fs.target" ];
     serviceConfig = {
@@ -64,20 +64,22 @@
       RemainAfterExit = true;
     };
     script = ''
-      ${pkgs.coreutils}/bin/mkdir -p /etc/ssh /var/empty /run
-      ${pkgs.coreutils}/bin/chmod 0755 /etc/ssh
+      set -euo pipefail
+      ${pkgs.coreutils}/bin/mkdir -p /run/ssh /var/empty
+      ${pkgs.coreutils}/bin/chmod 0700 /run/ssh
       ${pkgs.coreutils}/bin/chmod 0555 /var/empty
-      ${pkgs.openssh}/bin/ssh-keygen -A
+      ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /run/ssh/ssh_host_ed25519_key -N "" -q
+      ${pkgs.openssh}/bin/ssh-keygen -t rsa -b 2048 -f /run/ssh/ssh_host_rsa_key -N "" -q
       ${pkgs.coreutils}/bin/printf '%s\n' \
         'Port 22' \
-        'HostKey /etc/ssh/ssh_host_ed25519_key' \
-        'HostKey /etc/ssh/ssh_host_rsa_key' \
+        'HostKey /run/ssh/ssh_host_ed25519_key' \
+        'HostKey /run/ssh/ssh_host_rsa_key' \
         'PermitRootLogin yes' \
         'PasswordAuthentication yes' \
         'UsePAM yes' \
         'PidFile /run/sshd.pid' \
         'Subsystem sftp ${pkgs.openssh}/libexec/sftp-server' \
-        > /run/sshd_config
+        > /run/ssh/sshd_config
     '';
   };
 
@@ -87,17 +89,17 @@
     after = [ "bootc-sshd-setup.service" "network.target" ];
     requires = [ "bootc-sshd-setup.service" ];
     serviceConfig = {
-      ExecStartPre = lib.mkForce "${pkgs.openssh}/bin/sshd -t -f /run/sshd_config";
-      ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -f /run/sshd_config";
+      ExecStartPre = lib.mkForce "${pkgs.openssh}/bin/sshd -t -f /run/ssh/sshd_config";
+      ExecStart = lib.mkForce "${pkgs.openssh}/bin/sshd -D -e -f /run/ssh/sshd_config";
     };
   };
 
-  # 7. 在 local-fs.target 之前绑定挂载 /sysroot/boot -> /boot，确保 update-grub-bls 启动时目录已就绪
+  # 7. 延迟 update-grub-bls 到 multi-user.target 且确保 /boot 已就绪
   systemd.services."ostree-boot-link" = {
     description = "Bind-mount /sysroot/boot to /boot for ostree/bootc";
     unitConfig.DefaultDependencies = false;
     wantedBy = [ "local-fs.target" ];
-    before = [ "local-fs.target" "update-grub-bls.service" ];
+    before = [ "local-fs.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -112,9 +114,10 @@
       fi
     '';
   };
+
   systemd.services."update-grub-bls" = {
-    after = [ "ostree-boot-link.service" "local-fs.target" ];
-    requires = [ "ostree-boot-link.service" ];
+    wantedBy = lib.mkForce [ "multi-user.target" ];
+    after = lib.mkForce [ "local-fs.target" "ostree-boot-link.service" ];
   };
 
   # 8. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
@@ -150,7 +153,6 @@
     "d /var/mnt/hgfs 0755 root root -"
     "d /var/usrlocal 0755 root root -"
     "d /var/empty 0555 root root -"
-    "d /etc/ssh 0755 root root -"
     "d /mount/hgfs 0755 root root -"
     "d /var/lib/AccountsService 0755 root root -"
     "d /var/lib/AccountsService/users 0700 root root -"
