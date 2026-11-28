@@ -292,7 +292,7 @@ jobs:
                               print("\n>>> [AUTO-VERIFY] 成功进入 root shell，执行严格运行态断言...")
                               time.sleep(0.5)
                               verify_cmd = (
-                                  "systemctl --failed --no-legend || true; "
+                                  "SYSTEMD_PAGER=cat systemctl --failed --no-legend --no-pager || true; "
                                   "systemctl status bootc-sshd-setup.service update-grub-bls.service sshd.service --no-pager -l || true; "
                                   "journalctl -u bootc-sshd-setup -u update-grub-bls -u sshd --no-pager || true; "
                                   "set -e; "
