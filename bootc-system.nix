@@ -43,7 +43,19 @@
   services.logrotate.enable = lib.mkForce false;
   systemd.services."flatpak-repo".enable = lib.mkForce false;
 
-  # 6. 配置常驻 OpenSSH 守护进程（不触碰 chattr +i 锁定的 /var/empty，仅操作 /run/ssh）
+  # 6. 显式固定 sshd 权限分离系统账号的静态 UID/GID，确保 image.nix 自动导出到 /usr/etc/passwd
+  users.users.sshd = {
+    isSystemUser = true;
+    group = "sshd";
+    uid = 498;
+    home = "/var/empty";
+    description = "SSH privilege separation user";
+  };
+  users.groups.sshd = {
+    gid = 498;
+  };
+
+  # 7. 配置常驻 OpenSSH 守护进程（不触碰 chattr +i 锁定的 /var/empty，仅操作 /run/ssh）
   services.openssh = {
     enable = true;
     startWhenNeeded = false;
@@ -93,7 +105,7 @@
     };
   };
 
-  # 7. 绑定 /boot 并重新挂载为可写（解除 sysroot readonly 继承），再同步 OSTree BLS 条目到 GRUB 配置
+  # 8. 绑定 /boot 并重新挂载为可写（解除 sysroot readonly 继承），再同步 OSTree BLS 条目到 GRUB 配置
   systemd.services."ostree-boot-link" = {
     description = "Bind-mount /sysroot/boot to /boot as rw for ostree/bootc";
     unitConfig.DefaultDependencies = false;
@@ -165,13 +177,13 @@
     };
   };
 
-  # 8. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
+  # 9. 保留 XFCE 桌面软件包，默认以命令行 multi-user.target 启动（需桌面时执行 sudo systemctl start display-manager）
   systemd.defaultUnit = lib.mkForce "multi-user.target";
   systemd.services."display-manager".enable = lib.mkForce false;
   boot.initrd.kernelModules = [ "vmwgfx" ];
   services.xserver.videoDrivers = [ "vmware" "modesetting" ];
 
-  # 9. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target
+  # 10. 强制将 getty@tty1/tty2 与 serial-getty@ttyS0 挂载到 multi-user.target
   systemd.services."getty@tty1" = {
     enable = true;
     wantedBy = [ "multi-user.target" ];
@@ -186,7 +198,7 @@
     serviceConfig.TTYReset = "no";
   };
 
-  # 10. 初始化标准 OSTree /var/* 持久化目录（对应 /home、/root、/opt、/srv、/mnt、/usr/local 软链接）
+  # 11. 初始化标准 OSTree /var/* 持久化目录（对应 /home、/root、/opt、/srv、/mnt、/usr/local 软链接）
   systemd.automounts = lib.mkForce [];
   systemd.tmpfiles.rules = [
     "d /var/home 0755 root root -"
@@ -204,7 +216,7 @@
     "d /var/lib/AccountsService/icons 0775 root root -"
   ];
 
-  # 11. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
+  # 12. 确保目标系统内置 bootc 和 ostree 工具以支持后续的 bootc upgrade / rollback
   environment.systemPackages = with pkgs; [
     bootc
     ostree
@@ -213,7 +225,7 @@
     dosfstools
   ];
 
-  # 12. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
+  # 13. 默认优先使用标准 FHS 路径，同时保留 NixOS 系统路径以便 systemd 与核心组件正常解析
   environment.variables = {
     PATH = lib.mkForce "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
   };
